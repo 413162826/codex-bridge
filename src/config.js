@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { createSecurityConfig } from './accessControl.js';
+
 const repoRoot = path.resolve(process.cwd());
 
 export const defaultConfig = {
@@ -26,6 +28,7 @@ export const defaultConfig = {
     maxEventRows: 300,
     defaultSessionName: 'New Codex Session',
   },
+  security: createSecurityConfig(),
 };
 
 export function createRuntimeConfig() {

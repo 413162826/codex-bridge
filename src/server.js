@@ -5,6 +5,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
+import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
@@ -101,12 +102,23 @@ function setBaseHeaders(res) {
   if (config.server.cors) {
     res.setHeader('access-control-allow-origin', '*');
     res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('access-control-allow-headers', 'content-type,authorization');
+    res.setHeader('access-control-allow-headers', 'content-type,authorization,x-codex-bridge-key,x-codex-app-id');
   }
 }
 
 async function handleApi(req, res, url) {
   const route = `${req.method} ${url.pathname}`;
+  const access = evaluateApiAccess({ req, security: config.security, apps });
+  req.access = access;
+  if (!access.allowed) {
+    sendJson(res, access.statusCode || 403, {
+      error: {
+        message: access.message || '无权访问该 API',
+        statusCode: access.statusCode || 403,
+      },
+    });
+    return;
+  }
 
   if (route === 'GET /api/health') {
     sendJson(res, 200, { ok: true, bridge: publicConfig(), codex: codex.getStatus() });
@@ -165,7 +177,7 @@ async function handleApi(req, res, url) {
   }
 
   if (route === 'GET /api/sessions') {
-    sendJson(res, 200, { data: store.list().map(summarySession) });
+    sendJson(res, 200, { data: visibleSessions(req).map(summarySession) });
     return;
   }
 
@@ -260,6 +272,14 @@ async function handleApi(req, res, url) {
 async function createSession(req, res) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
+  if (req.access?.scope === 'app') {
+    if (body.appId && body.appId !== req.access.appId) {
+      const error = new Error('当前 appId 不能为其他 APP 创建 session');
+      error.statusCode = 403;
+      throw error;
+    }
+    body.appId = req.access.appId;
+  }
   const app = body.appId ? apps.require(body.appId) : null;
   const request = normalizeSessionRequest(body, app);
   const result = await codex.request('thread/start', {
@@ -298,15 +318,17 @@ async function handleAppRoute(req, res, appId) {
 }
 
 async function handleSessionRoute(req, res, url, sessionId, action) {
+  const session = store.require(sessionId);
+  assertSessionAccess(req, session);
+
   if (req.method === 'GET' && !action) {
-    sendJson(res, 200, { session: store.require(sessionId) });
+    sendJson(res, 200, { session });
     return;
   }
 
   if (req.method === 'POST' && action === 'resume') {
     await codex.ensureStarted();
     const body = await readJsonBody(req);
-    const session = store.require(sessionId);
     const result = await codex.request('thread/resume', {
       threadId: session.threadId,
       cwd: session.cwd,
@@ -332,7 +354,6 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
   }
 
   if (req.method === 'POST' && action === 'interrupt') {
-    const session = store.require(sessionId);
     if (!session.activeTurnId) {
       sendJson(res, 200, { ok: true, skipped: true, reason: 'session 没有正在运行的 turn' });
       return;
@@ -346,7 +367,6 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
   }
 
   if (req.method === 'POST' && action === 'steer') {
-    const session = store.require(sessionId);
     const body = await readJsonBody(req);
     if (!session.activeTurnId) {
       const error = new Error('session 没有正在运行的 turn，无法 steer');
@@ -365,7 +385,6 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
   }
 
   if (req.method === 'POST' && action === 'archive') {
-    const session = store.require(sessionId);
     const result = await codex.request('thread/archive', { threadId: session.threadId });
     session.status = 'archived';
     sendJson(res, 200, { ok: true, result });
@@ -380,6 +399,7 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
 async function startTurn(req, res, url, sessionId) {
   await codex.ensureStarted();
   const session = store.require(sessionId);
+  assertSessionAccess(req, session);
   const body = await readJsonBody(req);
   const input = normalizeInput(body);
   const wait = url.searchParams.get('wait') === '1';
@@ -537,8 +557,28 @@ function publicConfig() {
       count: apps.list().length,
     },
     ui: config.ui,
+    security: publicSecurityConfig(config.security),
     api: apiDocumentation(),
   };
+}
+
+function visibleSessions(req) {
+  if (req.access?.scope !== 'app') {
+    return store.list();
+  }
+  return store.list().filter((session) => session.appId === req.access.appId);
+}
+
+function assertSessionAccess(req, session) {
+  if (req.access?.scope !== 'app') {
+    return;
+  }
+  if (session.appId === req.access.appId) {
+    return;
+  }
+  const error = new Error('当前 appId 无权访问该 session');
+  error.statusCode = 403;
+  throw error;
 }
 
 function summarySession(session) {
