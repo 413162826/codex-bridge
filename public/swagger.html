@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Bridge Swagger</title>
+    <link rel="stylesheet" href="/swagger-ui/swagger-ui.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #f7f3ee;
+      }
+
+      .swagger-shell {
+        min-height: 100vh;
+      }
+
+      .swagger-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 22px;
+        border-bottom: 1px solid #e5dbd1;
+        background: rgba(255, 250, 243, 0.96);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Microsoft YaHei", sans-serif;
+      }
+
+      .swagger-topbar strong {
+        display: block;
+        font-size: 20px;
+      }
+
+      .swagger-topbar span {
+        color: #736b63;
+        font-size: 13px;
+      }
+
+      .swagger-links {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .swagger-links a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 38px;
+        padding: 0 14px;
+        border-radius: 999px;
+        border: 1px solid #d9cec3;
+        color: #111;
+        text-decoration: none;
+        font-weight: 700;
+      }
+
+      #swagger-ui {
+        max-width: 1440px;
+        margin: 0 auto;
+      }
+
+      .swagger-ui .topbar {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="swagger-shell">
+      <header class="swagger-topbar">
+        <div>
+          <strong>Codex Bridge Swagger</strong>
+          <span>本地 OpenAPI 文档，方便后续项目、人或 AI 直接接入</span>
+        </div>
+        <nav class="swagger-links">
+          <a href="/">回到控制台</a>
+          <a href="/api/openapi.json" target="_blank" rel="noreferrer">查看 openapi.json</a>
+        </nav>
+      </header>
+      <div id="swagger-ui"></div>
+    </div>
+
+    <script src="/swagger-ui/swagger-ui-bundle.js"></script>
+    <script src="/swagger-ui/swagger-ui-standalone-preset.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: '/api/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        displayRequestDuration: true,
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 2,
+        docExpansion: 'list',
+        persistAuthorization: true,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout: 'BaseLayout',
+        tryItOutEnabled: true,
+      });
+    </script>
+  </body>
+</html>

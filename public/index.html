@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Bridge Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">C</div>
+          <div>
+            <strong>Codex Bridge</strong>
+            <span>Local API Console</span>
+          </div>
+        </div>
+
+        <section class="side-section">
+          <div class="section-label">Service</div>
+          <div class="status-row">
+            <span class="status-dot" id="serviceDot"></span>
+            <div>
+              <strong id="serviceState">checking</strong>
+              <span id="listenAddress">127.0.0.1</span>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="icon-button" id="startCodexBtn" title="启动 Codex app-server">Start</button>
+            <button class="icon-button muted" id="restartCodexBtn" title="重启 Codex app-server">Restart</button>
+          </div>
+        </section>
+
+        <section class="side-section">
+          <div class="section-label">Account</div>
+          <div class="metric-line">
+            <span>Auth</span>
+            <strong id="authMode">unknown</strong>
+          </div>
+          <div class="metric-line">
+            <span>Plan</span>
+            <strong id="planType">-</strong>
+          </div>
+          <button class="wide-button" id="refreshAccountBtn">Refresh account</button>
+        </section>
+
+        <section class="side-section api-list">
+          <div class="section-label">API Surface</div>
+          <code>GET /api/status</code>
+          <code>POST /api/sessions</code>
+          <code>POST /api/sessions/:id/turns</code>
+          <code>GET /api/events</code>
+          <code>POST /api/sessions/:id/interrupt</code>
+          <code>POST /api/sessions/:id/steer</code>
+          <div class="button-row">
+            <a class="wide-link" href="/docs" target="_blank" rel="noreferrer">Open Swagger</a>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyeline">Local Codex API Gateway</p>
+            <h1>API Console</h1>
+            <p class="topbar-copy">默认配置会作为新 session 的起点。日常用这里调模型、推理强度、速度和执行策略就够了。</p>
+          </div>
+        </header>
+
+        <div class="workspace-grid">
+          <section class="panel sessions-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-label">Sessions</span>
+                <h2>连接中的会话</h2>
+              </div>
+              <button id="createSessionBtn">New session</button>
+            </div>
+            <div class="session-list" id="sessionList"></div>
+          </section>
+
+          <section class="panel conversation-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-label">Conversation</span>
+                <h2 id="conversationTitle">未选择 session</h2>
+              </div>
+              <div class="button-row">
+                <button class="icon-button muted" id="resumeBtn">Resume</button>
+                <button class="icon-button danger" id="interruptBtn">Interrupt</button>
+              </div>
+            </div>
+            <div class="conversation-meta" id="conversationMeta"></div>
+            <div class="messages" id="messages"></div>
+            <form class="composer" id="composer">
+              <textarea id="promptInput" rows="3" placeholder="输入要发送给本地 Codex 的问题或任务"></textarea>
+              <div class="composer-actions">
+                <input id="steerInput" placeholder="运行中追加 steer 指令，可留空" />
+                <button type="submit">Send turn</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel inspector-panel">
+            <div class="panel-head">
+              <div>
+                <span class="section-label">Default Config</span>
+                <h2>对外默认配置</h2>
+              </div>
+              <div class="button-row">
+                <button class="icon-button" id="saveConfigBtn">Save config</button>
+                <button class="icon-button muted" id="openJsonBtn">View JSON</button>
+                <button class="icon-button muted" id="copyConfigBtn">Copy</button>
+              </div>
+            </div>
+            <div class="config-form">
+              <label class="config-field config-field-wide">
+                <span>Workspace cwd</span>
+                <input id="cwdInput" spellcheck="false" />
+                <small class="config-help">新 session 默认在哪个项目目录里工作。</small>
+              </label>
+
+              <label class="config-field">
+                <span>Model</span>
+                <select id="modelSelect">
+                  <option value="">Auto / Codex default</option>
+                </select>
+                <small class="config-help">`Auto` 表示跟随本机 Codex 当前默认模型。</small>
+              </label>
+
+              <label class="config-field">
+                <span>Effort</span>
+                <select id="effortSelect">
+                  <option value="minimal">minimal</option>
+                  <option value="low" selected>low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                </select>
+                <small class="config-help">推理强度，越高越稳但通常越慢。</small>
+              </label>
+
+              <label class="config-field">
+                <span>Speed</span>
+                <select id="speedSelect">
+                  <option value="fast">fast</option>
+                  <option value="balanced" selected>balanced</option>
+                  <option value="deep">deep</option>
+                </select>
+                <small class="config-help">更偏速度还是更偏深度。</small>
+              </label>
+
+              <label class="config-field">
+                <span>Sandbox</span>
+                <select id="sandboxSelect">
+                  <option value="read-only">read-only</option>
+                  <option value="workspace-write" selected>workspace-write</option>
+                  <option value="danger-full-access">danger-full-access</option>
+                </select>
+                <small class="config-help">控制 Codex 生成命令时可写权限的边界。</small>
+              </label>
+
+              <label class="config-field">
+                <span>Approval</span>
+                <select id="approvalSelect">
+                  <option value="never" selected>never</option>
+                  <option value="on-request">on-request</option>
+                  <option value="untrusted">untrusted</option>
+                </select>
+                <small class="config-help">是否在执行命令或改文件前等待人工确认。</small>
+              </label>
+
+              <label class="config-field config-toggle-card">
+                <span>Ephemeral</span>
+                <div class="toggle-row">
+                  <input id="ephemeralToggle" type="checkbox" />
+                  <strong id="ephemeralLabel">关闭</strong>
+                </div>
+                <small class="config-help">开启后会话更临时，不主打持久历史；关闭更适合后续 resume。</small>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel events-panel" id="eventsPanel">
+            <div class="panel-head">
+              <div>
+                <span class="section-label">Events</span>
+                <h2>实时事件流</h2>
+              </div>
+              <button class="icon-button muted" id="clearEventsBtn">Clear</button>
+            </div>
+            <div class="event-list" id="eventList"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <dialog class="config-dialog" id="configDialog">
+      <div class="dialog-head">
+        <div>
+          <span class="section-label">Raw Config</span>
+          <h2>当前配置 JSON</h2>
+        </div>
+        <button class="icon-button muted" id="closeConfigDialogBtn">Close</button>
+      </div>
+      <pre class="json-box dialog-json" id="configJson"></pre>
+    </dialog>
+
+    <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+
+    <template id="sessionTemplate">
+      <button class="session-item">
+        <span class="session-status"></span>
+        <strong></strong>
+        <small></small>
+      </button>
+    </template>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
