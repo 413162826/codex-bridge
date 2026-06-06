@@ -63,6 +63,10 @@ GET  /api/events
 GET  /api/models
 GET  /api/account
 GET  /api/rate-limits
+GET  /api/apps
+POST /api/apps
+GET  /api/apps/:id
+PUT  /api/apps/:id
 GET  /api/sessions
 POST /api/sessions
 GET  /api/sessions/:id
@@ -83,6 +87,21 @@ Invoke-RestMethod http://127.0.0.1:4555/api/sessions `
   -ContentType "application/json" `
   -Body '{"name":"demo","ephemeral":true}'
 ```
+
+## 创建 appId
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:4555/api/apps `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"name":"release-console"}'
+```
+
+它会：
+
+- 自动生成一个 `appId(UUID)`
+- 自动创建 `workspaces/<appId>` 目录
+- 自动复制当前全局默认配置作为这个 app 的初始配置
 
 ## 发送一轮对话
 

@@ -17,6 +17,18 @@
           </div>
         </div>
 
+        <section class="side-section nav-section">
+          <div class="section-label">Navigation</div>
+          <button class="nav-item is-active" id="navConsoleBtn" type="button">
+            <strong>API Console</strong>
+            <span>会话、对话和默认策略</span>
+          </button>
+          <button class="nav-item" id="navAppsBtn" type="button">
+            <strong>APP 管理</strong>
+            <span>创建 appId、默认配置和工作目录</span>
+          </button>
+        </section>
+
         <section class="side-section">
           <div class="section-label">Service</div>
           <div class="status-row">
@@ -60,139 +72,278 @@
       </aside>
 
       <main class="main">
-        <header class="topbar">
-          <div>
-            <p class="eyeline">Local Codex API Gateway</p>
-            <h1>API Console</h1>
-            <p class="topbar-copy">默认配置会作为新 session 的起点。日常用这里调模型、推理强度、速度和执行策略就够了。</p>
-          </div>
-        </header>
-
-        <div class="workspace-grid">
-          <section class="panel sessions-panel">
-            <div class="panel-head">
-              <div>
-                <span class="section-label">Sessions</span>
-                <h2>连接中的会话</h2>
-              </div>
-              <button id="createSessionBtn">New session</button>
+        <section class="view-screen" id="consoleView">
+          <header class="topbar">
+            <div>
+              <p class="eyeline">Local Codex API Gateway</p>
+              <h1>API Console</h1>
+              <p class="topbar-copy">默认配置会作为新 session 的起点。日常用这里调模型、推理强度、速度和执行策略就够了。</p>
             </div>
-            <div class="session-list" id="sessionList"></div>
-          </section>
+          </header>
 
-          <section class="panel conversation-panel">
-            <div class="panel-head">
-              <div>
-                <span class="section-label">Conversation</span>
-                <h2 id="conversationTitle">未选择 session</h2>
-              </div>
-              <div class="button-row">
-                <button class="icon-button muted" id="resumeBtn">Resume</button>
-                <button class="icon-button danger" id="interruptBtn">Interrupt</button>
-              </div>
-            </div>
-            <div class="conversation-meta" id="conversationMeta"></div>
-            <div class="messages" id="messages"></div>
-            <form class="composer" id="composer">
-              <textarea id="promptInput" rows="3" placeholder="输入要发送给本地 Codex 的问题或任务"></textarea>
-              <div class="composer-actions">
-                <input id="steerInput" placeholder="运行中追加 steer 指令，可留空" />
-                <button type="submit">Send turn</button>
-              </div>
-            </form>
-          </section>
-
-          <section class="panel inspector-panel">
-            <div class="panel-head">
-              <div>
-                <span class="section-label">Default Config</span>
-                <h2>对外默认配置</h2>
-              </div>
-              <div class="button-row">
-                <button class="icon-button" id="saveConfigBtn">Save config</button>
-                <button class="icon-button muted" id="openJsonBtn">View JSON</button>
-                <button class="icon-button muted" id="copyConfigBtn">Copy</button>
-              </div>
-            </div>
-            <div class="config-form">
-              <label class="config-field config-field-wide">
-                <span>Workspace cwd</span>
-                <input id="cwdInput" spellcheck="false" />
-                <small class="config-help">新 session 默认在哪个项目目录里工作。</small>
-              </label>
-
-              <label class="config-field">
-                <span>Model</span>
-                <select id="modelSelect">
-                  <option value="">Auto / Codex default</option>
-                </select>
-                <small class="config-help">`Auto` 表示跟随本机 Codex 当前默认模型。</small>
-              </label>
-
-              <label class="config-field">
-                <span>Effort</span>
-                <select id="effortSelect">
-                  <option value="minimal">minimal</option>
-                  <option value="low" selected>low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
-                </select>
-                <small class="config-help">推理强度，越高越稳但通常越慢。</small>
-              </label>
-
-              <label class="config-field">
-                <span>Speed</span>
-                <select id="speedSelect">
-                  <option value="fast">fast</option>
-                  <option value="balanced" selected>balanced</option>
-                  <option value="deep">deep</option>
-                </select>
-                <small class="config-help">更偏速度还是更偏深度。</small>
-              </label>
-
-              <label class="config-field">
-                <span>Sandbox</span>
-                <select id="sandboxSelect">
-                  <option value="read-only">read-only</option>
-                  <option value="workspace-write" selected>workspace-write</option>
-                  <option value="danger-full-access">danger-full-access</option>
-                </select>
-                <small class="config-help">控制 Codex 生成命令时可写权限的边界。</small>
-              </label>
-
-              <label class="config-field">
-                <span>Approval</span>
-                <select id="approvalSelect">
-                  <option value="never" selected>never</option>
-                  <option value="on-request">on-request</option>
-                  <option value="untrusted">untrusted</option>
-                </select>
-                <small class="config-help">是否在执行命令或改文件前等待人工确认。</small>
-              </label>
-
-              <label class="config-field config-toggle-card">
-                <span>Ephemeral</span>
-                <div class="toggle-row">
-                  <input id="ephemeralToggle" type="checkbox" />
-                  <strong id="ephemeralLabel">关闭</strong>
+          <div class="workspace-grid">
+            <section class="panel sessions-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Sessions</span>
+                  <h2>连接中的会话</h2>
                 </div>
-                <small class="config-help">开启后会话更临时，不主打持久历史；关闭更适合后续 resume。</small>
-              </label>
-            </div>
-          </section>
-
-          <section class="panel events-panel" id="eventsPanel">
-            <div class="panel-head">
-              <div>
-                <span class="section-label">Events</span>
-                <h2>实时事件流</h2>
+                <button id="createSessionBtn">New session</button>
               </div>
-              <button class="icon-button muted" id="clearEventsBtn">Clear</button>
+              <div class="session-list" id="sessionList"></div>
+            </section>
+
+            <section class="panel conversation-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Conversation</span>
+                  <h2 id="conversationTitle">未选择 session</h2>
+                </div>
+                <div class="button-row">
+                  <button class="icon-button muted" id="resumeBtn">Resume</button>
+                  <button class="icon-button danger" id="interruptBtn">Interrupt</button>
+                </div>
+              </div>
+              <div class="conversation-meta" id="conversationMeta"></div>
+              <div class="messages" id="messages"></div>
+              <form class="composer" id="composer">
+                <textarea id="promptInput" rows="3" placeholder="输入要发送给本地 Codex 的问题或任务"></textarea>
+                <div class="composer-actions">
+                  <input id="steerInput" placeholder="运行中追加 steer 指令，可留空" />
+                  <button type="submit">Send turn</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel inspector-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Default Config</span>
+                  <h2>对外默认配置</h2>
+                </div>
+                <div class="button-row">
+                  <button class="icon-button" id="saveConfigBtn">Save config</button>
+                  <button class="icon-button muted" id="openJsonBtn">View JSON</button>
+                  <button class="icon-button muted" id="copyConfigBtn">Copy</button>
+                </div>
+              </div>
+              <div class="config-form">
+                <label class="config-field config-field-wide">
+                  <span>Workspace cwd</span>
+                  <input id="cwdInput" spellcheck="false" />
+                  <small class="config-help">新 session 默认在哪个项目目录里工作。</small>
+                </label>
+
+                <label class="config-field">
+                  <span>Model</span>
+                  <select id="modelSelect">
+                    <option value="">Auto / Codex default</option>
+                  </select>
+                  <small class="config-help">`Auto` 表示跟随本机 Codex 当前默认模型。</small>
+                </label>
+
+                <label class="config-field">
+                  <span>Effort</span>
+                  <select id="effortSelect">
+                    <option value="minimal">minimal</option>
+                    <option value="low" selected>low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                  <small class="config-help">推理强度，越高越稳但通常越慢。</small>
+                </label>
+
+                <label class="config-field">
+                  <span>Speed</span>
+                  <select id="speedSelect">
+                    <option value="fast">fast</option>
+                    <option value="balanced" selected>balanced</option>
+                    <option value="deep">deep</option>
+                  </select>
+                  <small class="config-help">更偏速度还是更偏深度。</small>
+                </label>
+
+                <label class="config-field">
+                  <span>Sandbox</span>
+                  <select id="sandboxSelect">
+                    <option value="read-only">read-only</option>
+                    <option value="workspace-write" selected>workspace-write</option>
+                    <option value="danger-full-access">danger-full-access</option>
+                  </select>
+                  <small class="config-help">控制 Codex 生成命令时可写权限的边界。</small>
+                </label>
+
+                <label class="config-field">
+                  <span>Approval</span>
+                  <select id="approvalSelect">
+                    <option value="never" selected>never</option>
+                    <option value="on-request">on-request</option>
+                    <option value="untrusted">untrusted</option>
+                  </select>
+                  <small class="config-help">是否在执行命令或改文件前等待人工确认。</small>
+                </label>
+
+                <label class="config-field config-toggle-card">
+                  <span>Ephemeral</span>
+                  <div class="toggle-row">
+                    <input id="ephemeralToggle" type="checkbox" />
+                    <strong id="ephemeralLabel">关闭</strong>
+                  </div>
+                  <small class="config-help">开启后会话更临时，不主打持久历史；关闭更适合后续 resume。</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="panel events-panel" id="eventsPanel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Events</span>
+                  <h2>实时事件流</h2>
+                </div>
+                <button class="icon-button muted" id="clearEventsBtn">Clear</button>
+              </div>
+              <div class="event-list" id="eventList"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view-screen" id="appsView" hidden>
+          <header class="topbar">
+            <div>
+              <p class="eyeline">App Registry</p>
+              <h1>APP 管理</h1>
+              <p class="topbar-copy">这里负责创建 `appId`、自动生成专属工作目录，并维护这个应用的默认策略。新建时会复制一份当前全局默认配置。</p>
             </div>
-            <div class="event-list" id="eventList"></div>
-          </section>
-        </div>
+            <div class="button-row">
+              <button class="icon-button" id="createAppBtn" type="button">Create appId</button>
+            </div>
+          </header>
+
+          <div class="apps-grid">
+            <section class="panel apps-list-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Apps</span>
+                  <h2>已注册应用</h2>
+                </div>
+                <span class="counter-pill" id="appsCount">0</span>
+              </div>
+              <div class="app-list" id="appList"></div>
+            </section>
+
+            <section class="panel app-editor-panel">
+              <div class="panel-head">
+                <div>
+                  <span class="section-label">Selected App</span>
+                  <h2 id="appEditorTitle">未选择 app</h2>
+                </div>
+                <div class="button-row">
+                  <button class="icon-button muted" id="copyAppIdBtn" type="button">Copy appId</button>
+                  <button class="icon-button" id="saveAppBtn" type="button">Save app</button>
+                </div>
+              </div>
+
+              <div class="app-empty-state" id="appEmptyState">
+                <strong>还没有选中的 APP</strong>
+                <span>点击左侧已有 app，或者直接点上方 `Create appId` 新建一个。</span>
+              </div>
+
+              <div class="app-editor" id="appEditor" hidden>
+                <div class="app-note">
+                  <strong>生效顺序：</strong>
+                  请求显式参数 &gt; APP 默认配置 &gt; 全局默认配置。`cwd` 不允许外部传入，固定使用该 app 的 `workspaceRoot`。
+                </div>
+
+                <div class="app-meta-grid">
+                  <div class="meta-card meta-card-wide">
+                    <span>App ID</span>
+                    <strong id="appIdValue">-</strong>
+                  </div>
+                  <div class="meta-card meta-card-wide">
+                    <span>Workspace Root</span>
+                    <strong id="appWorkspaceValue">-</strong>
+                  </div>
+                  <div class="meta-card">
+                    <span>Created</span>
+                    <strong id="appCreatedAtValue">-</strong>
+                  </div>
+                  <div class="meta-card">
+                    <span>Updated</span>
+                    <strong id="appUpdatedAtValue">-</strong>
+                  </div>
+                </div>
+
+                <div class="config-form">
+                  <label class="config-field config-field-wide">
+                    <span>App name</span>
+                    <input id="appNameInput" spellcheck="false" />
+                    <small class="config-help">只是管理端显示名称，不影响鉴权。appId 才是应用标识。</small>
+                  </label>
+
+                  <label class="config-field">
+                    <span>Model</span>
+                    <select id="appModelSelect">
+                      <option value="">Auto / Codex default</option>
+                    </select>
+                    <small class="config-help">留空表示默认跟随全局模型。</small>
+                  </label>
+
+                  <label class="config-field">
+                    <span>Effort</span>
+                    <select id="appEffortSelect">
+                      <option value="minimal">minimal</option>
+                      <option value="low" selected>low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                    </select>
+                    <small class="config-help">该 app 的默认推理强度。</small>
+                  </label>
+
+                  <label class="config-field">
+                    <span>Speed</span>
+                    <select id="appSpeedSelect">
+                      <option value="fast">fast</option>
+                      <option value="balanced" selected>balanced</option>
+                      <option value="deep">deep</option>
+                    </select>
+                    <small class="config-help">Bridge 侧偏好标签，便于上层策略区分。</small>
+                  </label>
+
+                  <label class="config-field">
+                    <span>Sandbox</span>
+                    <select id="appSandboxSelect">
+                      <option value="read-only">read-only</option>
+                      <option value="workspace-write" selected>workspace-write</option>
+                      <option value="danger-full-access">danger-full-access</option>
+                    </select>
+                    <small class="config-help">该 app 默认用什么执行边界。</small>
+                  </label>
+
+                  <label class="config-field">
+                    <span>Approval</span>
+                    <select id="appApprovalSelect">
+                      <option value="never" selected>never</option>
+                      <option value="on-request">on-request</option>
+                      <option value="untrusted">untrusted</option>
+                    </select>
+                    <small class="config-help">该 app 默认是否要人工确认。</small>
+                  </label>
+
+                  <label class="config-field config-toggle-card">
+                    <span>Ephemeral</span>
+                    <div class="toggle-row">
+                      <input id="appEphemeralToggle" type="checkbox" />
+                      <strong id="appEphemeralLabel">关闭</strong>
+                    </div>
+                    <small class="config-help">开启后这个 app 默认跑临时 session；关闭后更适合 resume。</small>
+                  </label>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
 

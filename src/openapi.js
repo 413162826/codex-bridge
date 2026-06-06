@@ -11,6 +11,7 @@ export function createOpenApiSpec(config) {
         '',
         '几个关键约定：',
         '- `cwd` 表示新 session 或 turn 默认在哪个项目目录下工作。',
+        '- `appId` 表示调用方应用身份；如果传了 `appId`，session 默认会绑定到该 app 的 `workspaceRoot`。',
         '- `model / effort / sandbox / approvalPolicy / ephemeral` 是最核心的策略参数。',
         '- `speed` 目前主要是 bridge 侧的策略标签，方便 UI 和上层调用方表达偏好，当前不会直接映射到底层 app-server 官方参数。',
         '- `GET /api/events` 与 `GET /api/sessions/{sessionId}/events` 返回的是 SSE，不是普通 JSON。',
@@ -25,6 +26,7 @@ export function createOpenApiSpec(config) {
     tags: [
       { name: 'Bridge', description: 'Bridge 自身状态、配置和健康检查' },
       { name: 'Codex Runtime', description: '控制本机 codex app-server 子进程' },
+      { name: 'Apps', description: '管理 appId、默认配置和专属工作目录' },
       { name: 'Sessions', description: '创建、查看、恢复和归档 session' },
       { name: 'Turns', description: '发起对话、等待结果、打断和 steer' },
       { name: 'Streaming', description: 'SSE 事件流' },
@@ -168,6 +170,50 @@ export function createOpenApiSpec(config) {
           responses: okJsonResponse('#/components/schemas/GenericObjectResponse'),
         },
       },
+      '/api/apps': {
+        get: {
+          tags: ['Apps'],
+          summary: '列出 APP',
+          description: '返回当前已注册的 app 列表。每个 app 都有自己的 `appId`、`workspaceRoot` 和默认配置。',
+          responses: okJsonResponse('#/components/schemas/AppsListResponse'),
+        },
+        post: {
+          tags: ['Apps'],
+          summary: '创建 APP',
+          description: '自动生成一个 `appId(UUID)`，同时创建同名工作目录，并复制一份当前全局默认配置作为该 app 的初始配置。',
+          requestBody: jsonRequestBody('#/components/schemas/CreateAppRequest', {
+            name: 'release-console',
+          }),
+          responses: createdJsonResponse('#/components/schemas/AppResponse'),
+        },
+      },
+      '/api/apps/{appId}': {
+        get: {
+          tags: ['Apps'],
+          summary: '读取单个 APP',
+          description: '返回这个 app 的完整配置，包括 `workspaceRoot` 和默认策略。',
+          parameters: [appIdParam()],
+          responses: okJsonResponse('#/components/schemas/AppResponse'),
+        },
+        put: {
+          tags: ['Apps'],
+          summary: '更新 APP',
+          description: '更新 app 名称和默认配置。`workspaceRoot` 固定为该 app 的专属目录，不支持从外部修改。',
+          parameters: [appIdParam()],
+          requestBody: jsonRequestBody('#/components/schemas/UpdateAppRequest', {
+            name: 'release-console-prod',
+            defaults: {
+              model: 'gpt-5.5',
+              effort: 'high',
+              speed: 'balanced',
+              sandbox: 'workspace-write',
+              approvalPolicy: 'never',
+              ephemeral: false,
+            },
+          }),
+          responses: okJsonResponse('#/components/schemas/AppResponse'),
+        },
+      },
       '/api/sessions': {
         get: {
           tags: ['Sessions'],
@@ -182,13 +228,13 @@ export function createOpenApiSpec(config) {
             '创建一个新 session，本质上会调用 app-server 的 `thread/start`。',
             '',
             '注意：',
-            '- `cwd` 是默认项目目录，不是“所有内容都写到这里”。',
+            '- 如果传了 `appId`，`cwd` 固定使用该 app 的 `workspaceRoot`，不会接受外部覆盖。',
             '- `effort` 会存为该 session 的默认 turn 策略，但不会在 `thread/start` 时直接下发。',
             '- `speed` 目前只是 bridge 侧标签，不直接约束底层 app-server。',
           ].join('\n'),
           requestBody: jsonRequestBody('#/components/schemas/CreateSessionRequest', {
+            appId: '0322f41b-561e-43d0-b561-96ed72110918',
             name: 'release-console',
-            cwd: 'D:\\Program Files\\dev-project\\github\\release-console',
             model: 'gpt-5.5',
             effort: 'high',
             speed: 'fast',
@@ -217,7 +263,6 @@ export function createOpenApiSpec(config) {
           parameters: [sessionIdParam()],
           requestBody: jsonRequestBody('#/components/schemas/ResumeSessionRequest', {
             model: 'gpt-5.4',
-            cwd: 'D:\\Program Files\\dev-project\\github\\release-console',
             sandbox: 'workspace-write',
             approvalPolicy: 'never',
           }),
@@ -255,6 +300,7 @@ export function createOpenApiSpec(config) {
             '支持两种输入方式：',
             '- 传 `text` / `prompt`：最简单文本输入',
             '- 传 `input` 数组：高级模式，支持 `text`、`image`、`localImage`、`skill`、`mention`',
+            '- 这版 bridge 不允许外部为 turn 单独传 `cwd`；工作目录来自该 session。',
           ].join('\n'),
           parameters: [
             sessionIdParam(),
@@ -407,6 +453,12 @@ export function createOpenApiSpec(config) {
               },
             },
             codex: { $ref: '#/components/schemas/CodexConfig' },
+            apps: {
+              type: 'object',
+              properties: {
+                count: { type: 'integer', example: 2 },
+              },
+            },
             ui: {
               type: 'object',
               properties: {
@@ -475,6 +527,13 @@ export function createOpenApiSpec(config) {
             codex: { $ref: '#/components/schemas/CodexRuntimeStatus' },
           },
         },
+        CodexRuntimeResponse: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean', example: true },
+            codex: { $ref: '#/components/schemas/CodexRuntimeStatus' },
+          },
+        },
         StatusResponse: {
           type: 'object',
           properties: {
@@ -510,6 +569,7 @@ export function createOpenApiSpec(config) {
           properties: {
             id: { type: 'string' },
             threadId: { type: 'string' },
+            appId: { type: ['string', 'null'] },
             codexSessionId: { type: 'string' },
             name: { type: 'string' },
             status: { type: 'string', example: 'ready' },
@@ -560,9 +620,9 @@ export function createOpenApiSpec(config) {
         CreateSessionRequest: {
           type: 'object',
           properties: {
+            appId: { type: 'string', description: '应用身份。传了以后，默认 `cwd` 从该 app 的 `workspaceRoot` 取值。' },
             name: { type: 'string' },
             initialPrompt: { type: 'string' },
-            cwd: { type: 'string' },
             model: { type: ['string', 'null'] },
             effort: { type: 'string' },
             speed: { type: 'string' },
@@ -577,7 +637,6 @@ export function createOpenApiSpec(config) {
         ResumeSessionRequest: {
           type: 'object',
           properties: {
-            cwd: { type: 'string' },
             model: { type: ['string', 'null'] },
             approvalPolicy: { type: 'string' },
             sandbox: { type: 'string' },
@@ -593,7 +652,6 @@ export function createOpenApiSpec(config) {
               description: '高级输入模式，可直接传 app-server input 数组。',
               items: { $ref: '#/components/schemas/UserInput' },
             },
-            cwd: { type: 'string' },
             approvalPolicy: { type: 'string' },
             sandboxPolicy: {
               type: 'object',
@@ -799,6 +857,59 @@ export function createOpenApiSpec(config) {
             },
           },
         },
+        AppDefaults: {
+          type: 'object',
+          properties: {
+            model: { type: ['string', 'null'] },
+            effort: { type: 'string' },
+            speed: { type: 'string' },
+            approvalPolicy: { type: 'string' },
+            sandbox: { type: 'string' },
+            ephemeral: { type: 'boolean' },
+            experimentalRawEvents: { type: 'boolean' },
+            persistExtendedHistory: { type: 'boolean' },
+            serviceName: { type: ['string', 'null'] },
+          },
+        },
+        AppRecord: {
+          type: 'object',
+          properties: {
+            appId: { type: 'string', format: 'uuid' },
+            name: { type: 'string' },
+            workspaceRoot: { type: 'string' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+            defaults: { $ref: '#/components/schemas/AppDefaults' },
+          },
+        },
+        AppResponse: {
+          type: 'object',
+          properties: {
+            app: { $ref: '#/components/schemas/AppRecord' },
+          },
+        },
+        AppsListResponse: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AppRecord' },
+            },
+          },
+        },
+        CreateAppRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+          },
+        },
+        UpdateAppRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            defaults: { $ref: '#/components/schemas/AppDefaults' },
+          },
+        },
       },
     },
   };
@@ -903,6 +1014,20 @@ function sessionIdParam() {
     schema: {
       type: 'string',
       example: '019e9bd4-a9ae-7680-96f1-02535ffc800a',
+    },
+  };
+}
+
+function appIdParam() {
+  return {
+    name: 'appId',
+    in: 'path',
+    required: true,
+    description: 'APP 身份标识，也是专属工作目录名。',
+    schema: {
+      type: 'string',
+      format: 'uuid',
+      example: '0322f41b-561e-43d0-b561-96ed72110918',
     },
   };
 }

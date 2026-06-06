@@ -3,6 +3,10 @@ const state = {
   sessions: [],
   selectedSessionId: null,
   selectedSession: null,
+  apps: [],
+  selectedAppId: null,
+  selectedApp: null,
+  activeView: 'console',
   events: [],
   models: [],
   eventSource: null,
@@ -15,6 +19,10 @@ const els = {
   serviceDot: $('serviceDot'),
   serviceState: $('serviceState'),
   listenAddress: $('listenAddress'),
+  navConsoleBtn: $('navConsoleBtn'),
+  navAppsBtn: $('navAppsBtn'),
+  consoleView: $('consoleView'),
+  appsView: $('appsView'),
   startCodexBtn: $('startCodexBtn'),
   restartCodexBtn: $('restartCodexBtn'),
   authMode: $('authMode'),
@@ -38,6 +46,26 @@ const els = {
   steerInput: $('steerInput'),
   resumeBtn: $('resumeBtn'),
   interruptBtn: $('interruptBtn'),
+  createAppBtn: $('createAppBtn'),
+  appsCount: $('appsCount'),
+  appList: $('appList'),
+  appEditorTitle: $('appEditorTitle'),
+  copyAppIdBtn: $('copyAppIdBtn'),
+  saveAppBtn: $('saveAppBtn'),
+  appEmptyState: $('appEmptyState'),
+  appEditor: $('appEditor'),
+  appIdValue: $('appIdValue'),
+  appWorkspaceValue: $('appWorkspaceValue'),
+  appCreatedAtValue: $('appCreatedAtValue'),
+  appUpdatedAtValue: $('appUpdatedAtValue'),
+  appNameInput: $('appNameInput'),
+  appModelSelect: $('appModelSelect'),
+  appEffortSelect: $('appEffortSelect'),
+  appSpeedSelect: $('appSpeedSelect'),
+  appSandboxSelect: $('appSandboxSelect'),
+  appApprovalSelect: $('appApprovalSelect'),
+  appEphemeralToggle: $('appEphemeralToggle'),
+  appEphemeralLabel: $('appEphemeralLabel'),
   ephemeralLabel: $('ephemeralLabel'),
   openJsonBtn: $('openJsonBtn'),
   configDialog: $('configDialog'),
@@ -55,6 +83,7 @@ boot().catch((error) => pushEvent({ type: 'ui.error', error: error.message }));
 async function boot() {
   document.body.classList.toggle('events-hidden', !state.debugEventsVisible);
   bindEvents();
+  renderView();
   await refreshAll();
   connectEvents();
   setInterval(refreshLight, state.config?.ui?.refreshMs || 1500);
@@ -119,6 +148,30 @@ function bindEvents() {
       showToast('配置 JSON 已复制到剪贴板', 'success');
     }),
   );
+  els.navConsoleBtn.addEventListener('click', () => setView('console'));
+  els.navAppsBtn.addEventListener('click', () => setView('apps'));
+  els.createAppBtn.addEventListener('click', () =>
+    runButtonAction(els.createAppBtn, 'Creating...', async () => {
+      await createApp();
+      showToast('新 appId 已创建，并复制了当前全局配置', 'success');
+    }),
+  );
+  els.copyAppIdBtn.addEventListener('click', () =>
+    runButtonAction(els.copyAppIdBtn, 'Copying...', async () => {
+      if (!state.selectedApp) {
+        showToast('先选择一个 app', 'warning');
+        return;
+      }
+      await copyText(state.selectedApp.appId);
+      showToast('appId 已复制到剪贴板', 'success');
+    }),
+  );
+  els.saveAppBtn.addEventListener('click', () =>
+    runButtonAction(els.saveAppBtn, 'Saving...', async () => {
+      await saveSelectedApp();
+      showToast('APP 默认配置已保存', 'success');
+    }),
+  );
   els.composer.addEventListener('submit', sendTurn);
 }
 
@@ -132,7 +185,7 @@ async function refreshAll() {
   renderSessions();
   renderConfig();
   renderEvents();
-  await Promise.allSettled([refreshModels(), refreshAccount()]);
+  await Promise.allSettled([refreshModels(), refreshAccount(), refreshApps()]);
   await refreshLight();
   if (!state.selectedSessionId && state.sessions[0]) {
     await selectSession(state.sessions[0].id);
@@ -174,15 +227,8 @@ function connectEvents() {
 async function refreshModels() {
   const result = await get('/api/models');
   state.models = result.data || [];
-  const current = els.modelSelect.value;
-  els.modelSelect.innerHTML = '<option value="">Auto / Codex default</option>';
-  for (const item of state.models) {
-    const option = document.createElement('option');
-    option.value = item.id || item.model;
-    option.textContent = `${item.displayName || item.id || item.model}${item.isDefault ? ' · default' : ''}`;
-    els.modelSelect.appendChild(option);
-  }
-  els.modelSelect.value = current || state.config?.codex?.model || '';
+  populateModelSelect(els.modelSelect, els.modelSelect.value || state.config?.codex?.model || '');
+  populateModelSelect(els.appModelSelect, state.selectedApp?.defaults?.model || '');
 }
 
 async function refreshAccount() {
@@ -230,6 +276,19 @@ function renderConfig() {
   els.configJson.textContent = JSON.stringify(state.config, null, 2);
 }
 
+async function refreshApps() {
+  const result = await get('/api/apps');
+  state.apps = result.data || [];
+  renderAppsList();
+  if (!state.selectedAppId && state.apps[0]) {
+    await selectApp(state.apps[0].appId);
+  } else if (state.selectedAppId) {
+    await selectApp(state.selectedAppId, { silent: true });
+  } else {
+    renderAppEditor();
+  }
+}
+
 function renderSessions() {
   els.sessionList.innerHTML = '';
   if (!state.sessions.length) {
@@ -250,6 +309,43 @@ function renderSessions() {
       <small>${escapeHtml(session.status)} · ${session.messageCount} messages · ${formatTime(session.updatedAt)}</small>
     `;
     els.sessionList.appendChild(button);
+  }
+}
+
+function renderAppsList() {
+  els.appsCount.textContent = String(state.apps.length);
+  els.appList.innerHTML = '';
+  if (!state.apps.length) {
+    const empty = document.createElement('div');
+    empty.className = 'event-item';
+    empty.innerHTML = '<strong>No apps</strong><span>点击 Create appId 自动创建一个新的应用身份和默认工作目录。</span>';
+    els.appList.appendChild(empty);
+    return;
+  }
+
+  for (const app of state.apps) {
+    const button = document.createElement('button');
+    button.className = `app-item ${app.appId === state.selectedAppId ? 'active' : ''}`;
+    button.type = 'button';
+    button.addEventListener('click', () => selectApp(app.appId));
+    button.innerHTML = `
+      <strong>${escapeHtml(app.name)}</strong>
+      <small>${escapeHtml(app.appId)}</small>
+      <small>${escapeHtml(app.workspaceRoot)}</small>
+    `;
+    els.appList.appendChild(button);
+  }
+}
+
+async function selectApp(appId, { silent = false } = {}) {
+  try {
+    const result = await get(`/api/apps/${encodeURIComponent(appId)}`);
+    state.selectedAppId = appId;
+    state.selectedApp = result.app;
+    renderAppsList();
+    renderAppEditor();
+  } catch (error) {
+    if (!silent) showError(error);
   }
 }
 
@@ -285,6 +381,34 @@ function renderConversation() {
     els.messages.appendChild(item);
   }
   els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+function renderAppEditor() {
+  const app = state.selectedApp;
+  const hasApp = Boolean(app);
+  els.appEmptyState.hidden = hasApp;
+  els.appEditor.hidden = !hasApp;
+  els.copyAppIdBtn.disabled = !hasApp;
+  els.saveAppBtn.disabled = !hasApp;
+
+  if (!app) {
+    els.appEditorTitle.textContent = '未选择 app';
+    return;
+  }
+
+  els.appEditorTitle.textContent = app.name;
+  els.appIdValue.textContent = app.appId;
+  els.appWorkspaceValue.textContent = app.workspaceRoot;
+  els.appCreatedAtValue.textContent = formatDateTime(app.createdAt);
+  els.appUpdatedAtValue.textContent = formatDateTime(app.updatedAt);
+  els.appNameInput.value = app.name;
+  populateModelSelect(els.appModelSelect, app.defaults.model || '');
+  els.appEffortSelect.value = app.defaults.effort || 'low';
+  els.appSpeedSelect.value = app.defaults.speed || 'balanced';
+  els.appSandboxSelect.value = app.defaults.sandbox || 'workspace-write';
+  els.appApprovalSelect.value = app.defaults.approvalPolicy || 'never';
+  els.appEphemeralToggle.checked = Boolean(app.defaults.ephemeral);
+  els.appEphemeralLabel.textContent = app.defaults.ephemeral ? '开启' : '关闭';
 }
 
 function renderEvents() {
@@ -323,7 +447,6 @@ async function createSession() {
   await saveConfig();
   const result = await post('/api/sessions', {
     name: `Session ${new Date().toLocaleTimeString()}`,
-    cwd: els.cwdInput.value.trim(),
     model: els.modelSelect.value || null,
     effort: els.effortSelect.value,
     speed: els.speedSelect.value,
@@ -334,6 +457,36 @@ async function createSession() {
   state.selectedSessionId = result.session.id;
   await refreshAll();
   await selectSession(result.session.id);
+}
+
+async function createApp() {
+  const result = await post('/api/apps', {});
+  state.selectedAppId = result.app.appId;
+  await refreshApps();
+  await selectApp(result.app.appId);
+  setView('apps');
+}
+
+async function saveSelectedApp() {
+  if (!state.selectedApp) {
+    showToast('先选择一个 app', 'warning');
+    return;
+  }
+
+  const result = await put(`/api/apps/${encodeURIComponent(state.selectedApp.appId)}`, {
+    name: els.appNameInput.value.trim(),
+    defaults: {
+      model: els.appModelSelect.value || null,
+      effort: els.appEffortSelect.value,
+      speed: els.appSpeedSelect.value,
+      sandbox: els.appSandboxSelect.value,
+      approvalPolicy: els.appApprovalSelect.value,
+      ephemeral: els.appEphemeralToggle.checked,
+    },
+  });
+  state.selectedApp = result.app;
+  await refreshApps();
+  renderAppEditor();
 }
 
 async function resumeSelectedSession() {
@@ -429,6 +582,31 @@ function showError(error) {
   showToast(error.message || '操作失败', 'error');
 }
 
+function setView(view) {
+  state.activeView = view;
+  renderView();
+}
+
+function renderView() {
+  const isConsole = state.activeView === 'console';
+  els.consoleView.hidden = !isConsole;
+  els.appsView.hidden = isConsole;
+  els.navConsoleBtn.classList.toggle('is-active', isConsole);
+  els.navAppsBtn.classList.toggle('is-active', !isConsole);
+}
+
+function populateModelSelect(select, value = '') {
+  if (!select) return;
+  select.innerHTML = '<option value="">Auto / Codex default</option>';
+  for (const item of state.models) {
+    const option = document.createElement('option');
+    option.value = item.id || item.model;
+    option.textContent = `${item.displayName || item.id || item.model}${item.isDefault ? ' · default' : ''}`;
+    select.appendChild(option);
+  }
+  select.value = value || '';
+}
+
 async function copyText(text) {
   try {
     if (navigator.clipboard?.writeText) {
@@ -493,6 +671,13 @@ function formatTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return '';
   return date.toLocaleTimeString();
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return '-';
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
 }
 
 function escapeHtml(value) {

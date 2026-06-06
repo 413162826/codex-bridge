@@ -5,11 +5,13 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
+import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
 import { createOpenApiSpec } from './openapi.js';
 import { SessionStore } from './sessionStore.js';
+import { loadBridgeState, saveBridgeState } from './stateStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,7 +19,10 @@ const projectRoot = path.resolve(__dirname, '..');
 const publicRoot = path.join(projectRoot, 'public');
 const swaggerUiRoot = path.join(projectRoot, 'node_modules', 'swagger-ui-dist');
 
+const persistedState = await loadBridgeState();
 const config = createRuntimeConfig();
+mergeConfig(config, persistedState.config);
+const apps = new AppRegistry({ apps: persistedState.apps });
 const store = new SessionStore();
 const bus = new EventEmitter();
 bus.setMaxListeners(200);
@@ -132,6 +137,7 @@ async function handleApi(req, res, url) {
   if (route === 'PUT /api/config') {
     const patch = await readJsonBody(req);
     mergeConfig(config, patch);
+    await persistState();
     publish({ type: 'bridge.config.updated', config: publicConfig(), receivedAt: new Date().toISOString() });
     sendJson(res, 200, publicConfig());
     return;
@@ -160,6 +166,23 @@ async function handleApi(req, res, url) {
 
   if (route === 'GET /api/sessions') {
     sendJson(res, 200, { data: store.list().map(summarySession) });
+    return;
+  }
+
+  if (route === 'GET /api/apps') {
+    sendJson(res, 200, { data: apps.list() });
+    return;
+  }
+
+  if (route === 'POST /api/apps') {
+    const body = await readJsonBody(req);
+    const app = await apps.createFromGlobal({
+      globalCodexConfig: config.codex,
+      name: body.name,
+    });
+    await persistState();
+    publish({ type: 'bridge.app.created', app, receivedAt: new Date().toISOString() });
+    sendJson(res, 201, { app });
     return;
   }
 
@@ -217,6 +240,12 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const appMatch = url.pathname.match(/^\/api\/apps\/([^/]+)$/);
+  if (appMatch) {
+    await handleAppRoute(req, res, appMatch[1]);
+    return;
+  }
+
   const doc = apiDocumentation();
   if (route === 'GET /api') {
     sendJson(res, 200, doc);
@@ -231,7 +260,8 @@ async function handleApi(req, res, url) {
 async function createSession(req, res) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
-  const request = normalizeSessionRequest(body);
+  const app = body.appId ? apps.require(body.appId) : null;
+  const request = normalizeSessionRequest(body, app);
   const result = await codex.request('thread/start', {
     model: request.model,
     cwd: request.cwd,
@@ -247,6 +277,26 @@ async function createSession(req, res) {
   sendJson(res, 201, { session });
 }
 
+async function handleAppRoute(req, res, appId) {
+  if (req.method === 'GET') {
+    sendJson(res, 200, { app: apps.require(appId) });
+    return;
+  }
+
+  if (req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const app = apps.update(appId, body);
+    await persistState();
+    publish({ type: 'bridge.app.updated', app, receivedAt: new Date().toISOString() });
+    sendJson(res, 200, { app });
+    return;
+  }
+
+  const error = new Error(`未知 app API：${req.method} /api/apps/${appId}`);
+  error.statusCode = 404;
+  throw error;
+}
+
 async function handleSessionRoute(req, res, url, sessionId, action) {
   if (req.method === 'GET' && !action) {
     sendJson(res, 200, { session: store.require(sessionId) });
@@ -259,7 +309,7 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
     const session = store.require(sessionId);
     const result = await codex.request('thread/resume', {
       threadId: session.threadId,
-      cwd: body.cwd || session.cwd,
+      cwd: session.cwd,
       approvalPolicy: body.approvalPolicy || session.approvalPolicy,
       sandbox: body.sandbox || session.sandbox,
       model: body.model ?? session.model,
@@ -337,7 +387,6 @@ async function startTurn(req, res, url, sessionId) {
   const result = await codex.request('turn/start', {
     threadId: session.threadId,
     input,
-    cwd: body.cwd,
     approvalPolicy: body.approvalPolicy,
     sandboxPolicy: body.sandboxPolicy,
     model: body.model ?? session.model,
@@ -434,20 +483,26 @@ function writeSse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-function normalizeSessionRequest(body) {
+function normalizeSessionRequest(body, app = null) {
+  const baseCodex = resolveAppEffectiveCodexConfig({
+    app,
+    globalCodexConfig: config.codex,
+  });
+
   return {
+    appId: app?.appId ?? null,
     name: body.name,
     initialPrompt: body.initialPrompt,
-    cwd: body.cwd || config.codex.cwd,
-    model: body.model ?? config.codex.model,
-    effort: body.effort ?? config.codex.effort,
-    speed: body.speed ?? config.codex.speed,
-    approvalPolicy: body.approvalPolicy || config.codex.approvalPolicy,
-    sandbox: body.sandbox || config.codex.sandbox,
-    serviceName: body.serviceName || config.codex.serviceName,
-    ephemeral: body.ephemeral ?? config.codex.ephemeral,
-    experimentalRawEvents: body.experimentalRawEvents ?? config.codex.experimentalRawEvents,
-    persistExtendedHistory: body.persistExtendedHistory ?? config.codex.persistExtendedHistory,
+    cwd: baseCodex.cwd,
+    model: body.model ?? baseCodex.model,
+    effort: body.effort ?? baseCodex.effort,
+    speed: body.speed ?? baseCodex.speed,
+    approvalPolicy: body.approvalPolicy || baseCodex.approvalPolicy,
+    sandbox: body.sandbox || baseCodex.sandbox,
+    serviceName: body.serviceName || baseCodex.serviceName,
+    ephemeral: body.ephemeral ?? baseCodex.ephemeral,
+    experimentalRawEvents: body.experimentalRawEvents ?? baseCodex.experimentalRawEvents,
+    persistExtendedHistory: body.persistExtendedHistory ?? baseCodex.persistExtendedHistory,
   };
 }
 
@@ -478,6 +533,9 @@ function publicConfig() {
     startedAt: config.startedAt,
     server: config.server,
     codex: config.codex,
+    apps: {
+      count: apps.list().length,
+    },
     ui: config.ui,
     api: apiDocumentation(),
   };
@@ -488,6 +546,7 @@ function summarySession(session) {
   return {
     id: session.id,
     threadId: session.threadId,
+    appId: session.appId,
     codexSessionId: session.codexSessionId,
     name: session.name,
     status: session.status,
@@ -531,6 +590,10 @@ function apiDocumentation() {
       'GET /api/account',
       'POST /api/account/login/start',
       'GET /api/rate-limits',
+      'GET /api/apps',
+      'POST /api/apps',
+      'GET /api/apps/:id',
+      'PUT /api/apps/:id',
       'GET /api/server-requests',
       'POST /api/server-requests/:id/respond',
       'GET /api/sessions',
@@ -545,6 +608,16 @@ function apiDocumentation() {
       'POST /api/sessions/:id/archive',
     ],
   };
+}
+
+async function persistState() {
+  await saveBridgeState({
+    config: {
+      codex: config.codex,
+      ui: config.ui,
+    },
+    apps: apps.toJSON(),
+  });
 }
 
 async function serveStatic(req, res, url) {

@@ -13,6 +13,7 @@ export class SessionStore {
     const session = {
       id: threadId,
       threadId,
+      appId: request.appId ?? null,
       codexSessionId: thread.sessionId ?? threadId,
       name: request.name || previewName(request.initialPrompt) || config.ui.defaultSessionName,
       status: 'ready',
