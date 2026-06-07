@@ -1,0 +1,19 @@
+{
+  "name": "Codex Chat",
+  "short_name": "Codex",
+  "description": "手机版 Codex Chat —— 直连本机 codex-bridge",
+  "start_url": "/m/index.html",
+  "scope": "/m/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f4ef",
+  "theme_color": "#f7f4ef",
+  "icons": [
+    {
+      "src": "/m/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

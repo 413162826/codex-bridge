@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#f7f4ef" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Codex Chat" />
+    <link rel="manifest" href="/m/manifest.webmanifest" />
+    <link rel="stylesheet" href="/m/styles.css" />
+    <title>Codex Chat</title>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <button class="icon-btn" id="menuBtn" type="button" aria-label="会话列表">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <div class="topbar-title" id="title">Codex Chat</div>
+        <button class="icon-btn" id="newBtn" type="button" aria-label="新会话">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+
+      <main class="messages" id="messages">
+        <div class="welcome" id="welcome">
+          <div class="welcome-mark">✦</div>
+          <h1>Codex Chat</h1>
+          <p>发条消息开启新会话，点左上角切换历史会话。</p>
+          <div class="suggest" id="suggest">
+            <button type="button" data-prompt="用一句话总结当前项目结构。">总结项目</button>
+            <button type="button" data-image="一张简洁的科技感工作台插画">生成图片</button>
+            <button type="button" data-prompt="帮我写一个快速排序的示例。">写代码</button>
+          </div>
+        </div>
+      </main>
+
+      <form class="composer" id="composer">
+        <div class="composer-row">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="问 Codex 一个问题，或描述要生成的图片"
+            enterkeyhint="send"
+          ></textarea>
+          <button class="send-btn" id="sendBtn" type="submit" aria-label="发送">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 12l16-8-6 8 6 8z" fill="currentColor"/></svg>
+          </button>
+        </div>
+        <div class="composer-actions">
+          <button class="mode-btn" id="imageBtn" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 5h16v14H4z M4 16l4-4 3 3 4-5 5 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+            图片生成
+          </button>
+          <span class="composer-hint" id="hint"></span>
+        </div>
+      </form>
+    </div>
+
+    <div class="drawer-backdrop" id="backdrop" hidden></div>
+    <aside class="drawer" id="drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <strong>会话</strong>
+        <button class="icon-btn" id="closeDrawer" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <button class="drawer-new" id="drawerNew" type="button">＋ 新会话</button>
+      <div class="session-list" id="sessionList"></div>
+      <button class="drawer-settings" id="settingsBtn" type="button">⚙ 接入设置（地址 / appId）</button>
+    </aside>
+
+    <dialog class="settings" id="settingsDialog">
+      <h2>接入设置</h2>
+      <label>
+        Bridge 地址
+        <input id="baseUrlInput" inputmode="url" placeholder="留空=当前地址，或 https://bridge.kevinsu.xyz" />
+      </label>
+      <label>
+        App ID
+        <input id="appIdInput" placeholder="粘贴 appId（本机直连可留空）" autocapitalize="off" autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="settings-tip">手机走公网时必须填 appId；本机 127.0.0.1 直连可留空。</p>
+      <div class="settings-actions">
+        <button id="settingsCancel" type="button">取消</button>
+        <button id="settingsSave" type="button" class="primary">保存</button>
+      </div>
+    </dialog>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="/m/app.js" type="module"></script>
+  </body>
+</html>
