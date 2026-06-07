@@ -1,0 +1,13 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 4555
+  },
+  "security": {
+    "requireAuth": true,
+    "allowAppIdKeys": true,
+    "trustProxy": false,
+    "allowedIps": [],
+    "adminKeys": []
+  }
+}

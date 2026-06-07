@@ -70,16 +70,28 @@ $env:CODEX_BRIDGE_APPROVAL_POLICY="never"
 npm start
 ```
 
+## 配置文件 bridge.config.json
+
+仓库根目录的 `bridge.config.json` 是随项目提交的静态配置，启动时一定会读取。外部鉴权就写死在这里：
+
+```json
+{
+  "server": { "host": "127.0.0.1", "port": 4555 },
+  "security": { "requireAuth": true, "allowAppIdKeys": true, "trustProxy": false, "allowedIps": [], "adminKeys": [] }
+}
+```
+
+优先级：环境变量 > `bridge.config.json` > 内置默认。所以 `requireAuth` 默认就是开启的，不用再设 `CODEX_BRIDGE_REQUIRE_AUTH`；只有要临时关掉本机鉴权调试时，才用 `$env:CODEX_BRIDGE_REQUIRE_AUTH="0"`。
+
 ## 外部 API 白名单
 
-默认只适合本机使用。需要让手机或外部应用接入时，建议开启 Bridge 应用层访问控制：
+外部鉴权已由 `bridge.config.json` 写死开启，启动必带，直接 `npm start` 即可：
 
 ```powershell
-$env:CODEX_BRIDGE_HOST="0.0.0.0"
-$env:CODEX_BRIDGE_PORT="4555"
-$env:CODEX_BRIDGE_REQUIRE_AUTH="1"
 npm start
 ```
+
+> 走 ngrok / Cloudflare Tunnel 等隧道时，`host` 保持 `127.0.0.1` 即可（隧道 agent 在本机连回环，公网碰不到局域网最安全）。只有局域网内手机要直连时，才把 `bridge.config.json` 里的 `server.host` 改成 `0.0.0.0`。
 
 访问控制规则：
 
@@ -210,9 +222,10 @@ es.onmessage = (event) => console.log(JSON.parse(event.data));
 
 ## 设计边界
 
-这一版是本机开发版：
+这一版主要面向本机 + 隧道接入：
 
-- 默认不强制外部鉴权；开启 `CODEX_BRIDGE_REQUIRE_AUTH=1` 后会校验 IP 白名单、admin key 或已注册 `appId`。
+- 默认通过 `bridge.config.json` 强制外部鉴权（`requireAuth: true`），校验 IP 白名单、admin key 或已注册 `appId`；本机回环仍直接放行管理端。
+- 经隧道转发（带 `X-Forwarded-For`）的回环请求不再当本机放行，必须带 `appId`。
 - 默认只监听 `127.0.0.1`。
 - CORS 默认打开，方便本机调试。
 - 不建议直接暴露公网。

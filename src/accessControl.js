@@ -1,17 +1,35 @@
 const bearerPrefix = 'bearer ';
 
-export function createSecurityConfig(env = process.env) {
-  const allowedIps = splitList(env.CODEX_BRIDGE_ALLOWED_IPS);
-  const adminKeys = splitList(env.CODEX_BRIDGE_ADMIN_KEYS || env.CODEX_BRIDGE_API_KEYS);
-  const requireAuth = env.CODEX_BRIDGE_REQUIRE_AUTH === '1' || allowedIps.length > 0 || adminKeys.length > 0;
+export function createSecurityConfig(env = process.env, base = {}) {
+  const allowedIps = pickList(env.CODEX_BRIDGE_ALLOWED_IPS, base.allowedIps);
+  const adminKeys = pickList(env.CODEX_BRIDGE_ADMIN_KEYS || env.CODEX_BRIDGE_API_KEYS, base.adminKeys);
+  const requireAuth = resolveRequireAuth(env.CODEX_BRIDGE_REQUIRE_AUTH, base.requireAuth, allowedIps, adminKeys);
 
   return {
     requireAuth,
     allowedIps,
     adminKeys,
-    allowAppIdKeys: env.CODEX_BRIDGE_ALLOW_APP_KEYS !== '0',
-    trustProxy: env.CODEX_BRIDGE_TRUST_PROXY === '1',
+    allowAppIdKeys: env.CODEX_BRIDGE_ALLOW_APP_KEYS === '0' ? false : base.allowAppIdKeys !== false,
+    trustProxy: env.CODEX_BRIDGE_TRUST_PROXY === '1' ? true : Boolean(base.trustProxy),
   };
+}
+
+function resolveRequireAuth(envValue, baseValue, allowedIps, adminKeys) {
+  // 环境变量是显式开关；其次看配置文件写死的值；最后回退到"配了白名单/admin key 就视为要鉴权"。
+  if (envValue === '1') return true;
+  if (envValue === '0') return false;
+  if (baseValue === true) return true;
+  if (baseValue === false) return false;
+  return allowedIps.length > 0 || adminKeys.length > 0;
+}
+
+function pickList(envValue, baseValue) {
+  const fromEnv = splitList(envValue);
+  if (fromEnv.length) return fromEnv;
+  if (Array.isArray(baseValue)) {
+    return baseValue.map((item) => String(item).trim()).filter(Boolean);
+  }
+  return splitList(baseValue);
 }
 
 export function publicSecurityConfig(security = {}) {
@@ -30,7 +48,7 @@ export function evaluateApiAccess({ req, security, apps }) {
     return allow('admin', { reason: 'auth-disabled', clientIp });
   }
 
-  if (isLoopbackIp(clientIp) && isLocalHostHeader(getHeader(req, 'host'))) {
+  if (isDirectLoopback(req, clientIp)) {
     return allow('admin', { reason: 'loopback', clientIp });
   }
 
@@ -147,6 +165,15 @@ function isAppRouteAllowed(method, pathname, appId) {
     return true;
   }
   return false;
+}
+
+function isDirectLoopback(req, clientIp) {
+  if (!isLoopbackIp(clientIp) || !isLocalHostHeader(getHeader(req, 'host'))) {
+    return false;
+  }
+  // 经过 ngrok / 反向代理隧道转发的请求即使从回环地址进来，也会带转发头；
+  // 这类请求不能享受本机管理员待遇，必须回到访问密钥校验。
+  return !getHeader(req, 'x-forwarded-for') && !getHeader(req, 'x-real-ip');
 }
 
 function isLoopbackIp(ip) {
