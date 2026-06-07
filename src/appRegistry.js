@@ -61,6 +61,9 @@ export class AppRegistry {
     if (typeof patch.name === 'string' && patch.name.trim()) {
       app.name = patch.name.trim();
     }
+    if (typeof patch.enabled === 'boolean') {
+      app.enabled = patch.enabled;
+    }
     if (patch.defaults && typeof patch.defaults === 'object') {
       Object.assign(app.defaults, sanitizeDefaultsPatch(patch.defaults, app.defaults));
     }
@@ -68,6 +71,12 @@ export class AppRegistry {
     const normalized = normalizeApp(app);
     this.apps.set(appId, normalized);
     return normalized;
+  }
+
+  remove(appId) {
+    const app = this.require(appId);
+    this.apps.delete(appId);
+    return app;
   }
 
   toJSON() {
@@ -93,6 +102,7 @@ function normalizeApp(app) {
     appId: app.appId,
     name: app.name || `App ${String(app.appId).slice(0, 8)}`,
     workspaceRoot: app.workspaceRoot,
+    enabled: app.enabled !== false,
     createdAt: app.createdAt || now,
     updatedAt: app.updatedAt || now,
     defaults: {

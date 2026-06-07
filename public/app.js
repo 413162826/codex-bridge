@@ -324,16 +324,79 @@ function renderAppsList() {
   }
 
   for (const app of state.apps) {
-    const button = document.createElement('button');
-    button.className = `app-item ${app.appId === state.selectedAppId ? 'active' : ''}`;
-    button.type = 'button';
-    button.addEventListener('click', () => selectApp(app.appId));
-    button.innerHTML = `
-      <strong>${escapeHtml(app.name)}</strong>
+    const enabled = app.enabled !== false;
+    const card = document.createElement('div');
+    card.className = `app-item ${app.appId === state.selectedAppId ? 'active' : ''} ${enabled ? '' : 'disabled'}`;
+
+    const main = document.createElement('button');
+    main.type = 'button';
+    main.className = 'app-item-main';
+    main.addEventListener('click', () => selectApp(app.appId));
+    main.innerHTML = `
+      <strong>${escapeHtml(app.name)}${enabled ? '' : '<span class="app-flag">已停用</span>'}</strong>
       <small>${escapeHtml(app.appId)}</small>
       <small>${escapeHtml(app.workspaceRoot)}</small>
     `;
-    els.appList.appendChild(button);
+    card.appendChild(main);
+
+    const actions = document.createElement('div');
+    actions.className = 'app-item-actions';
+
+    const toggle = document.createElement('label');
+    toggle.className = 'app-toggle';
+    toggle.title = enabled ? '取消勾选即停用：停用后该 appId 无法再鉴权访问' : '勾选以重新启用';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = enabled;
+    checkbox.addEventListener('click', (event) => event.stopPropagation());
+    checkbox.addEventListener('change', () => toggleApp(app.appId, checkbox.checked));
+    const toggleText = document.createElement('span');
+    toggleText.textContent = enabled ? '启用' : '停用';
+    toggle.append(checkbox, toggleText);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'app-delete';
+    delBtn.textContent = '删除';
+    delBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteApp(app);
+    });
+
+    actions.append(toggle, delBtn);
+    card.appendChild(actions);
+    els.appList.appendChild(card);
+  }
+}
+
+async function toggleApp(appId, enabled) {
+  try {
+    await put(`/api/apps/${encodeURIComponent(appId)}`, { enabled });
+    await refreshApps();
+    showToast(enabled ? '已启用' : '已停用', 'success');
+  } catch (error) {
+    showError(error);
+    await refreshApps();
+  }
+}
+
+async function deleteApp(app) {
+  const ok = window.confirm(
+    `确定删除应用 “${app.name}”？\n它的 appId 会立即失效，正在用它接入的客户端会被拒绝。\n工作目录文件不会被删除。`,
+  );
+  if (!ok) {
+    return;
+  }
+  try {
+    await del(`/api/apps/${encodeURIComponent(app.appId)}`);
+    if (state.selectedAppId === app.appId) {
+      state.selectedAppId = null;
+      state.selectedApp = null;
+    }
+    await refreshApps();
+    showToast('已删除应用', 'success');
+  } catch (error) {
+    showError(error);
   }
 }
 
@@ -566,6 +629,11 @@ async function put(path, body = {}) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+  return parseResponse(res);
+}
+
+async function del(path) {
+  const res = await fetch(path, { method: 'DELETE' });
   return parseResponse(res);
 }
 

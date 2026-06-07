@@ -325,6 +325,14 @@ async function handleAppRoute(req, res, appId) {
     return;
   }
 
+  if (req.method === 'DELETE') {
+    const app = apps.remove(appId);
+    await persistState();
+    publish({ type: 'bridge.app.deleted', appId, receivedAt: new Date().toISOString() });
+    sendJson(res, 200, { ok: true, app });
+    return;
+  }
+
   const error = new Error(`未知 app API：${req.method} /api/apps/${appId}`);
   error.statusCode = 404;
   throw error;
@@ -924,6 +932,7 @@ function apiDocumentation() {
       'POST /api/apps',
       'GET /api/apps/:id',
       'PUT /api/apps/:id',
+      'DELETE /api/apps/:id',
       'POST /api/uploads/images',
       'GET /api/server-requests',
       'POST /api/server-requests/:id/respond',

@@ -199,6 +199,20 @@ test('registered appId bearer token allows mobile runtime APIs', () => {
   }
 });
 
+test('a disabled appId is rejected even with an otherwise valid bearer token', () => {
+  const disabledApps = {
+    get: (appId) => (appId === 'app-123' ? { appId: 'app-123', enabled: false } : null),
+  };
+  const result = evaluateApiAccess({
+    req: request({ method: 'POST', path: '/api/sessions', headers: { authorization: 'Bearer app-123' } }),
+    security: secureConfig,
+    apps: disabledApps,
+  });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.statusCode, 403);
+});
+
 test('app scoped key cannot create new appIds', () => {
   const result = evaluateApiAccess({
     req: request({

@@ -70,6 +70,10 @@ export function evaluateApiAccess({ req, security, apps }) {
     return deny(401, '访问密钥无效，且来源 IP 不在白名单中', clientIp);
   }
 
+  if (app.enabled === false) {
+    return deny(403, '该 appId 已停用', clientIp, app.appId);
+  }
+
   const url = new URL(req.url, 'http://codex-bridge.local');
   if (!isAppRouteAllowed(req.method, url.pathname, app.appId)) {
     return deny(403, '当前 appId 无权访问该 API', clientIp, app.appId);

@@ -450,13 +450,25 @@ textarea:focus {
 
 .app-item {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   padding: 14px;
-  text-align: left;
   border: 1px solid transparent;
   border-radius: 16px;
   background: #fff;
+}
+
+.app-item-main {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
 .app-item strong,
@@ -475,6 +487,52 @@ textarea:focus {
 .app-item.active {
   border-color: #111;
   background: var(--mint);
+}
+
+.app-item.disabled {
+  opacity: 0.62;
+}
+
+.app-flag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #c0392b;
+  background: #fdeaea;
+}
+
+.app-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #f1f1f1;
+}
+
+.app-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.app-delete {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #f1c0c0;
+  background: #fff;
+  color: #c0392b;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.app-delete:hover {
+  background: #fdeaea;
 }
 
 .session-item strong,
