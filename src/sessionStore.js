@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
 export class SessionStore {
-  constructor({ maxEventsPerSession = 500 } = {}) {
+  constructor({ sessions = [], maxEventsPerSession = 500 } = {}) {
     this.sessions = new Map();
     this.events = [];
     this.maxEventsPerSession = maxEventsPerSession;
+    for (const session of sessions) {
+      const normalized = normalizePersistedSession(session);
+      if (normalized) {
+        this.sessions.set(normalized.id, normalized);
+      }
+    }
   }
 
   createSession({ thread, request, config }) {
@@ -64,6 +70,34 @@ export class SessionStore {
 
   list() {
     return [...this.sessions.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  toJSON() {
+    return this.list().map((session) => ({
+      id: session.id,
+      threadId: session.threadId,
+      appId: session.appId,
+      codexSessionId: session.codexSessionId,
+      name: session.name,
+      status: session.status,
+      runtimeStatus: session.runtimeStatus,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      cwd: session.cwd,
+      model: session.model,
+      effort: session.effort,
+      speed: session.speed,
+      approvalPolicy: session.approvalPolicy,
+      sandbox: session.sandbox,
+      ephemeral: session.ephemeral,
+      thread: session.thread,
+      messages: session.messages,
+      turns: session.turns,
+      events: session.events.slice(-80),
+      activeTurnId: session.activeTurnId,
+      lastError: session.lastError,
+      tokenUsage: session.tokenUsage,
+    }));
   }
 
   addUserMessage(session, { text, input, turnId = null }) {
@@ -201,6 +235,76 @@ export class SessionStore {
       }
     }
   }
+}
+
+function normalizePersistedSession(session) {
+  if (!session?.id && !session?.threadId) {
+    return null;
+  }
+  const id = session.id || session.threadId;
+  const now = new Date().toISOString();
+  const normalized = {
+    id,
+    threadId: session.threadId || id,
+    appId: session.appId ?? null,
+    codexSessionId: session.codexSessionId || session.thread?.sessionId || id,
+    name: session.name || id,
+    status: session.status || 'ready',
+    runtimeStatus: session.runtimeStatus,
+    createdAt: session.createdAt || now,
+    updatedAt: session.updatedAt || session.createdAt || now,
+    cwd: session.cwd || process.cwd(),
+    model: session.model ?? null,
+    effort: session.effort || 'low',
+    speed: session.speed || 'balanced',
+    approvalPolicy: session.approvalPolicy || 'never',
+    sandbox: session.sandbox || 'workspace-write',
+    ephemeral: Boolean(session.ephemeral),
+    thread: session.thread || { id },
+    messages: Array.isArray(session.messages) ? session.messages.map(normalizePersistedMessage) : [],
+    turns: Array.isArray(session.turns) ? session.turns.map(normalizePersistedTurn) : [],
+    events: Array.isArray(session.events) ? session.events.slice(-500) : [],
+    activeTurnId: session.activeTurnId ?? null,
+    lastError: session.lastError ?? null,
+    tokenUsage: session.tokenUsage,
+  };
+
+  if (normalized.status === 'running' || normalized.activeTurnId) {
+    normalized.status = 'ready';
+    normalized.activeTurnId = null;
+    normalized.messages = normalized.messages.map((message) =>
+      message.status === 'streaming' ? { ...message, status: 'interrupted' } : message,
+    );
+    normalized.turns = normalized.turns.map((turn) =>
+      turn.status === 'running' ? { ...turn, status: 'interrupted' } : turn,
+    );
+  }
+  return normalized;
+}
+
+function normalizePersistedMessage(message) {
+  return {
+    id: message.id || randomUUID(),
+    role: message.role || 'assistant',
+    turnId: message.turnId ?? null,
+    text: message.text || '',
+    status: message.status,
+    input: message.input ?? null,
+    createdAt: message.createdAt || new Date().toISOString(),
+    updatedAt: message.updatedAt,
+  };
+}
+
+function normalizePersistedTurn(turn) {
+  return {
+    id: turn.id || randomUUID(),
+    status: turn.status || 'completed',
+    input: turn.input ?? null,
+    startedAt: turn.startedAt || new Date().toISOString(),
+    completedAt: turn.completedAt ?? null,
+    assistantMessageId: turn.assistantMessageId,
+    turn: turn.turn,
+  };
 }
 
 function previewName(text) {

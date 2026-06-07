@@ -1,0 +1,26 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'cn.jollybaby.codexbridgequicktest'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'cn.jollybaby.codexbridgequicktest'
+        minSdk 23
+        targetSdk 35
+        versionCode 6
+        versionName '0.2.2'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}

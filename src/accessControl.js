@@ -106,7 +106,23 @@ function getHeader(req, name) {
 
 function isAppRouteAllowed(method, pathname, appId) {
   const route = `${method} ${pathname}`;
-  if (route === 'GET /api/health' || route === 'GET /api/models' || route === 'GET /api/openapi.json') {
+  if (
+    route === 'GET /api/health' ||
+    route === 'GET /api/status' ||
+    route === 'GET /api/config' ||
+    route === 'GET /api/models' ||
+    route === 'GET /api/account' ||
+    route === 'GET /api/rate-limits' ||
+    route === 'GET /api/openapi.json'
+  ) {
+    return true;
+  }
+
+  if (route === 'POST /api/codex/start' || route === 'POST /api/codex/restart') {
+    return true;
+  }
+
+  if (route === 'POST /api/uploads/images') {
     return true;
   }
 
@@ -124,7 +140,7 @@ function isAppRouteAllowed(method, pathname, appId) {
   }
 
   const action = sessionRoute[1] || '';
-  if (method === 'GET' && (!action || action === 'events')) {
+  if (method === 'GET' && (!action || action === 'events' || action === 'files')) {
     return true;
   }
   if (method === 'POST' && ['resume', 'turns', 'interrupt', 'steer', 'archive'].includes(action)) {

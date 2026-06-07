@@ -93,12 +93,68 @@ test('registered appId bearer token allows app scoped session API', () => {
   assert.equal(result.appId, 'app-123');
 });
 
+test('registered appId bearer token allows app scoped image uploads', () => {
+  const result = evaluateApiAccess({
+    req: request({
+      method: 'POST',
+      path: '/api/uploads/images',
+      headers: { authorization: 'Bearer app-123' },
+    }),
+    security: secureConfig,
+    apps: apps(['app-123']),
+  });
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.scope, 'app');
+  assert.equal(result.appId, 'app-123');
+});
+
+test('registered appId bearer token allows mobile runtime APIs', () => {
+  for (const [method, path] of [
+    ['GET', '/api/status'],
+    ['GET', '/api/config'],
+    ['GET', '/api/account'],
+    ['GET', '/api/rate-limits'],
+    ['POST', '/api/codex/start'],
+    ['POST', '/api/codex/restart'],
+  ]) {
+    const result = evaluateApiAccess({
+      req: request({
+        method,
+        path,
+        headers: { authorization: 'Bearer app-123' },
+      }),
+      security: secureConfig,
+      apps: apps(['app-123']),
+    });
+
+    assert.equal(result.allowed, true, `${method} ${path}`);
+    assert.equal(result.scope, 'app', `${method} ${path}`);
+    assert.equal(result.appId, 'app-123', `${method} ${path}`);
+  }
+});
+
 test('app scoped key cannot create new appIds', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'POST',
       path: '/api/apps',
       headers: { 'x-codex-bridge-key': 'app-123' },
+    }),
+    security: secureConfig,
+    apps: apps(['app-123']),
+  });
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.statusCode, 403);
+});
+
+test('app scoped key cannot write global config', () => {
+  const result = evaluateApiAccess({
+    req: request({
+      method: 'PUT',
+      path: '/api/config',
+      headers: { authorization: 'Bearer app-123' },
     }),
     security: secureConfig,
     apps: apps(['app-123']),

@@ -7,3 +7,7 @@ codex-output/
 .tmp-*
 data/
 workspaces/
+android/.gradle/
+android/app/build/
+android/local.properties
+android/*.apk

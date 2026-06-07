@@ -32,6 +32,7 @@ export function createOpenApiSpec(config) {
       { name: 'Streaming', description: 'SSE 事件流' },
       { name: 'Account', description: '查看本机 Codex 账号状态和登录' },
       { name: 'Models', description: '读取本机 Codex 当前可用模型列表' },
+      { name: 'Uploads', description: '手机或外部客户端上传图片到 app 工作区' },
       { name: 'Approvals', description: '处理 app-server 侧待响应的 server request' },
     ],
     paths: {
@@ -214,6 +215,23 @@ export function createOpenApiSpec(config) {
           responses: okJsonResponse('#/components/schemas/AppResponse'),
         },
       },
+      '/api/uploads/images': {
+        post: {
+          tags: ['Uploads'],
+          summary: '上传图片到 APP 工作区',
+          description: [
+            '把手机或外部客户端的 base64 图片保存到该 app 的 `workspaceRoot/uploads` 下。',
+            '返回值里的 `upload.input` 可直接放进 `POST /api/sessions/{sessionId}/turns` 的 `input` 数组，让本机 Codex 按 `localImage` 读取图片。',
+          ].join('\n'),
+          requestBody: jsonRequestBody('#/components/schemas/ImageUploadRequest', {
+            appId: '0322f41b-561e-43d0-b561-96ed72110918',
+            fileName: 'phone-photo.png',
+            mimeType: 'image/png',
+            base64: 'iVBORw0KGgo=',
+          }),
+          responses: createdJsonResponse('#/components/schemas/ImageUploadResponse'),
+        },
+      },
       '/api/sessions': {
         get: {
           tags: ['Sessions'],
@@ -287,6 +305,35 @@ export function createOpenApiSpec(config) {
                 },
               },
             },
+          },
+        },
+      },
+      '/api/sessions/{sessionId}/files': {
+        get: {
+          tags: ['Sessions'],
+          summary: '读取 session 工作目录内的图片文件',
+          description: '用于手机端查看 Codex 生成在当前 session 工作目录内的图片。`path` 必须位于该 session 的 `cwd` 内。',
+          parameters: [
+            sessionIdParam(),
+            {
+              name: 'path',
+              in: 'query',
+              required: true,
+              schema: { type: 'string' },
+              description: '电脑本地图片绝对路径，必须位于当前 session 工作目录内。',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Image file',
+              content: {
+                'image/png': { schema: { type: 'string', format: 'binary' } },
+                'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+                'image/webp': { schema: { type: 'string', format: 'binary' } },
+                'image/gif': { schema: { type: 'string', format: 'binary' } },
+              },
+            },
+            ...errorResponse(),
           },
         },
       },
@@ -908,6 +955,40 @@ export function createOpenApiSpec(config) {
           properties: {
             name: { type: 'string' },
             defaults: { $ref: '#/components/schemas/AppDefaults' },
+          },
+        },
+        ImageUploadRequest: {
+          type: 'object',
+          properties: {
+            appId: { type: 'string', description: '管理端调用时指定 app；app scope 调用会强制使用当前 access key 对应 app。' },
+            fileName: { type: 'string', example: 'phone-photo.png' },
+            mimeType: { type: 'string', example: 'image/png' },
+            base64: { type: 'string', description: '图片 base64，可带 data:image/...;base64, 前缀。' },
+          },
+          required: ['base64'],
+        },
+        ImageUploadResponse: {
+          type: 'object',
+          properties: {
+            upload: {
+              type: 'object',
+              properties: {
+                fileName: { type: 'string' },
+                originalName: { type: 'string' },
+                mimeType: { type: 'string' },
+                size: { type: 'integer' },
+                path: { type: 'string' },
+                input: {
+                  type: 'object',
+                  properties: {
+                    type: { type: 'string', const: 'localImage' },
+                    path: { type: 'string' },
+                  },
+                  required: ['type', 'path'],
+                },
+              },
+              required: ['fileName', 'mimeType', 'size', 'path', 'input'],
+            },
           },
         },
       },

@@ -13,10 +13,11 @@ export async function loadBridgeState() {
     return {
       config: parsed.config && typeof parsed.config === 'object' ? parsed.config : {},
       apps: Array.isArray(parsed.apps) ? parsed.apps : [],
+      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
     };
   } catch (error) {
     if (error.code === 'ENOENT') {
-      return { config: {}, apps: [] };
+      return { config: {}, apps: [], sessions: [] };
     }
     throw error;
   }

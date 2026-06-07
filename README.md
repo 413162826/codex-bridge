@@ -27,6 +27,27 @@ http://127.0.0.1:4555/docs
 http://127.0.0.1:4555/api/openapi.json
 ```
 
+Android APK：
+
+```text
+http://127.0.0.1:4555/codex-bridge.apk
+```
+
+Android 源码和构建脚本在：
+
+```text
+android/
+android/scripts/build-apk.ps1
+```
+
+手机端依赖的 Bridge API smoke：
+
+```powershell
+npm run smoke:android
+```
+
+它会验证 appId、图片上传、session 文件读取、创建会话、同一会话连续两轮对话和会话列表。
+
 ## 前置条件
 
 先确认本机 Codex 已安装并登录：
@@ -98,11 +119,13 @@ GET  /api/apps
 POST /api/apps
 GET  /api/apps/:id
 PUT  /api/apps/:id
+POST /api/uploads/images
 GET  /api/sessions
 POST /api/sessions
 GET  /api/sessions/:id
 POST /api/sessions/:id/resume
 GET  /api/sessions/:id/events
+GET  /api/sessions/:id/files?path=<local-path>
 POST /api/sessions/:id/turns
 POST /api/sessions/:id/turns?wait=1
 POST /api/sessions/:id/interrupt
@@ -143,6 +166,33 @@ Invoke-RestMethod "http://127.0.0.1:4555/api/sessions/$sid/turns?wait=1" `
   -ContentType "application/json" `
   -Body '{"text":"只回复 OK"}'
 ```
+
+## 手机图片输入
+
+Android 端可以先把图片上传到对应 `appId` 的工作区，再把返回的 `localImage` 作为 turn 输入传给 Codex：
+
+```powershell
+$body = @{
+  appId = "<appId>"
+  fileName = "phone.png"
+  mimeType = "image/png"
+  base64 = "<base64>"
+} | ConvertTo-Json
+
+Invoke-RestMethod http://127.0.0.1:4555/api/uploads/images `
+  -Method Post `
+  -ContentType "application/json" `
+  -Headers @{ Authorization = "Bearer <appId>" } `
+  -Body $body
+```
+
+如果 Codex 回复里包含当前 session 工作目录内的图片路径，手机端可通过：
+
+```text
+GET /api/sessions/<sessionId>/files?path=<local-image-path>
+```
+
+在原鉴权边界内查看这张图片。
 
 ## 事件流
 

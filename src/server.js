@@ -9,6 +9,7 @@ import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
+import { createImageUpload, isPathInside, resolveUploadAppId } from './fileGateway.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
 import { createOpenApiSpec } from './openapi.js';
 import { SessionStore } from './sessionStore.js';
@@ -24,7 +25,7 @@ const persistedState = await loadBridgeState();
 const config = createRuntimeConfig();
 mergeConfig(config, persistedState.config);
 const apps = new AppRegistry({ apps: persistedState.apps });
-const store = new SessionStore();
+const store = new SessionStore({ sessions: persistedState.sessions });
 const bus = new EventEmitter();
 bus.setMaxListeners(200);
 
@@ -46,6 +47,7 @@ function createClient() {
 function wireClient(client) {
   client.on('notification', (event) => {
     store.applyNotification(event);
+    persistState().catch((error) => publish({ type: 'bridge.persist.error', error: error.message }));
     publish({ type: 'codex.notification', ...event });
   });
 
@@ -129,7 +131,7 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, {
       bridge: publicConfig(),
       codex: codex.getStatus(),
-      sessions: store.list().map(summarySession),
+      sessions: visibleSessions(req).map(summarySession),
       serverRequests: codex.listServerRequests(),
       events: store.events.slice(-80),
     });
@@ -195,6 +197,11 @@ async function handleApi(req, res, url) {
     await persistState();
     publish({ type: 'bridge.app.created', app, receivedAt: new Date().toISOString() });
     sendJson(res, 201, { app });
+    return;
+  }
+
+  if (route === 'POST /api/uploads/images') {
+    await uploadImage(req, res);
     return;
   }
 
@@ -293,6 +300,7 @@ async function createSession(req, res) {
     persistExtendedHistory: request.persistExtendedHistory,
   });
   const session = store.createSession({ thread: result.thread, request, config });
+  await persistState();
   publish({ type: 'bridge.session.created', session: summarySession(session), receivedAt: new Date().toISOString() });
   sendJson(res, 201, { session });
 }
@@ -339,12 +347,18 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
       excludeTurns: false,
     });
     const resumed = store.upsertResumedSession({ thread: result.thread, request: body, config });
+    await persistState();
     sendJson(res, 200, { session: resumed });
     return;
   }
 
   if (req.method === 'GET' && action === 'events') {
     openSse(res, sessionId);
+    return;
+  }
+
+  if (req.method === 'GET' && action === 'files') {
+    await serveSessionFile(req, res, url, session);
     return;
   }
 
@@ -362,6 +376,7 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
       threadId: session.threadId,
       turnId: session.activeTurnId,
     });
+    await persistState();
     sendJson(res, 200, { ok: true, result });
     return;
   }
@@ -380,6 +395,7 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
       input,
     });
     store.addUserMessage(session, { input, turnId: session.activeTurnId });
+    await persistState();
     sendJson(res, 200, { ok: true, result });
     return;
   }
@@ -387,6 +403,7 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
   if (req.method === 'POST' && action === 'archive') {
     const result = await codex.request('thread/archive', { threadId: session.threadId });
     session.status = 'archived';
+    await persistState();
     sendJson(res, 200, { ok: true, result });
     return;
   }
@@ -421,6 +438,7 @@ async function startTurn(req, res, url, sessionId) {
   if (!session.turns.some((turn) => turn.id === result.turn.id)) {
     store.beginTurn(session, { turn: result.turn, input });
   }
+  await persistState();
   publish({
     type: 'bridge.turn.started',
     sessionId: session.id,
@@ -436,6 +454,30 @@ async function startTurn(req, res, url, sessionId) {
   }
 
   sendJson(res, 202, { session: summarySession(session), turn: result.turn });
+}
+
+async function uploadImage(req, res) {
+  const body = await readJsonBody(req);
+  const appId = resolveUploadAppId({ access: req.access, body, headers: req.headers });
+  const app = apps.require(appId);
+  const upload = await createImageUpload({
+    app,
+    fileName: body.fileName || body.name,
+    mimeType: body.mimeType,
+    base64: body.base64 || body.data,
+  });
+  sendJson(res, 201, { upload });
+}
+
+async function serveSessionFile(req, res, url, session) {
+  const rawPath = url.searchParams.get('path') || '';
+  const target = path.resolve(rawPath);
+  if (!rawPath || !isPathInside(session.cwd, target)) {
+    const error = new Error('文件路径不在当前 session 工作目录内');
+    error.statusCode = 403;
+    throw error;
+  }
+  await serveFile(res, target);
 }
 
 function waitForTurnCompleted(threadId, timeoutMs = 10 * 60 * 1000) {
@@ -634,6 +676,7 @@ function apiDocumentation() {
       'POST /api/apps',
       'GET /api/apps/:id',
       'PUT /api/apps/:id',
+      'POST /api/uploads/images',
       'GET /api/server-requests',
       'POST /api/server-requests/:id/respond',
       'GET /api/sessions',
@@ -641,6 +684,7 @@ function apiDocumentation() {
       'GET /api/sessions/:id',
       'POST /api/sessions/:id/resume',
       'GET /api/sessions/:id/events',
+      'GET /api/sessions/:id/files?path=<local-path>',
       'POST /api/sessions/:id/turns',
       'POST /api/sessions/:id/turns?wait=1',
       'POST /api/sessions/:id/interrupt',
@@ -657,6 +701,7 @@ async function persistState() {
       ui: config.ui,
     },
     apps: apps.toJSON(),
+    sessions: store.toJSON(),
   });
 }
 
@@ -706,6 +751,10 @@ function contentType(filePath) {
       '.svg': 'image/svg+xml',
       '.html': 'text/html; charset=utf-8',
       '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif',
     }[ext] || 'application/octet-stream'
   );
 }
