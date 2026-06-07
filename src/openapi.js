@@ -30,6 +30,7 @@ export function createOpenApiSpec(config) {
       { name: 'Sessions', description: '创建、查看、恢复和归档 session' },
       { name: 'Turns', description: '发起对话、等待结果、打断和 steer' },
       { name: 'Streaming', description: 'SSE 事件流' },
+      { name: 'High-level', description: '一次调用即流式输出的高级接口（/api/chat）' },
       { name: 'Account', description: '查看本机 Codex 账号状态和登录' },
       { name: 'Models', description: '读取本机 Codex 当前可用模型列表' },
       { name: 'Uploads', description: '手机或外部客户端上传图片到 app 工作区' },
@@ -214,6 +215,13 @@ export function createOpenApiSpec(config) {
           }),
           responses: okJsonResponse('#/components/schemas/AppResponse'),
         },
+        delete: {
+          tags: ['Apps'],
+          summary: '删除 APP',
+          description: '从注册表移除该 app，其 `appId` 立即失效（鉴权返回 401）。工作目录文件不会被删除。仅管理端（本机 / admin key）可调用，app scope 调用会 403。',
+          parameters: [appIdParam()],
+          responses: okJsonResponse('#/components/schemas/GenericObjectResponse'),
+        },
       },
       '/api/uploads/images': {
         post: {
@@ -230,6 +238,43 @@ export function createOpenApiSpec(config) {
             base64: 'iVBORw0KGgo=',
           }),
           responses: createdJsonResponse('#/components/schemas/ImageUploadResponse'),
+        },
+      },
+      '/api/chat': {
+        post: {
+          tags: ['High-level'],
+          summary: '建会话 + 流式对话（一次调用）',
+          description: [
+            '一个请求完成：创建 session（`thread/start`）+ 发起第一轮（`turn/start`）+ 以 `text/event-stream` 流式返回这一轮输出。**无需先建 session、无需轮询。**',
+            '',
+            '外部接入走域名时带 `Authorization: Bearer <appId>`；本机调用免鉴权。',
+            '',
+            'SSE 事件按 `event:` 名区分：',
+            '- `session`：首帧，含 `sessionId`，用于后续 `POST /api/sessions/{id}/turns?stream=1` 续轮。',
+            '- `delta`：逐字增量文本。',
+            '- `image`：生成图片（`url` 始终有；≤256KB 时附 `dataUrl` 内联 base64）。',
+            '- `usage`：token 用量。`done`：终止帧（含 `status`、`finalText`）。`error`：流中途错误。`ping`：15s 心跳。',
+          ].join('\n'),
+          requestBody: jsonRequestBody('#/components/schemas/ChatRequest', {
+            text: '用一句话解释快速排序',
+            appId: '0322f41b-561e-43d0-b561-96ed72110918',
+            effort: 'low',
+          }),
+          responses: {
+            '200': {
+              description: 'SSE 流（text/event-stream）',
+              content: {
+                'text/event-stream': {
+                  schema: {
+                    type: 'string',
+                    example:
+                      'event: session\\ndata: {"sessionId":"019e..."}\\n\\nevent: delta\\ndata: {"delta":"你好","seq":0}\\n\\nevent: done\\ndata: {"status":"completed","finalText":"你好"}\\n\\n',
+                  },
+                },
+              },
+            },
+            ...errorResponse(),
+          },
         },
       },
       '/api/sessions': {
@@ -352,6 +397,7 @@ export function createOpenApiSpec(config) {
           parameters: [
             sessionIdParam(),
             queryBool('wait', '是否等待本轮完成后再返回完整 session。', false),
+            queryBool('stream', '是否以 text/event-stream 流式返回这一轮（类型化事件同 /api/chat；与 wait 互斥）。', false),
           ],
           requestBody: jsonRequestBody('#/components/schemas/StartTurnRequest', {
             text: '总结当前项目结构',
@@ -360,10 +406,16 @@ export function createOpenApiSpec(config) {
           }),
           responses: {
             '200': {
-              description: '当 `wait=1` 时，等待 turn 完成后返回完整 session',
+              description: '`wait=1` 返回完整 session（JSON）；`stream=1` 返回 text/event-stream（类型化事件同 /api/chat）。',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/TurnResponse' },
+                },
+                'text/event-stream': {
+                  schema: {
+                    type: 'string',
+                    example: 'event: delta\\ndata: {"turnId":"...","delta":"你好","seq":0}\\n\\n',
+                  },
                 },
               },
             },
@@ -720,6 +772,26 @@ export function createOpenApiSpec(config) {
             },
           },
         },
+        ChatRequest: {
+          type: 'object',
+          description: '建会话 + 第一轮的合并入参：session 策略字段（appId/model/sandbox 等）+ 这一轮的输入（text 或 input）。',
+          properties: {
+            text: { type: 'string', description: '最简单的文本输入。' },
+            prompt: { type: 'string', description: 'text 的别名。' },
+            input: {
+              type: 'array',
+              description: '高级输入数组（text/image/localImage）。',
+              items: { $ref: '#/components/schemas/UserInput' },
+            },
+            appId: { type: 'string', description: '应用身份；app scope 调用会强制为当前 appId。' },
+            name: { type: 'string', description: '新 session 名称。' },
+            model: { type: ['string', 'null'] },
+            effort: { type: 'string' },
+            sandbox: { type: 'string' },
+            approvalPolicy: { type: 'string' },
+            ephemeral: { type: 'boolean' },
+          },
+        },
         UserInput: {
           oneOf: [
             {
@@ -924,6 +996,7 @@ export function createOpenApiSpec(config) {
             appId: { type: 'string', format: 'uuid' },
             name: { type: 'string' },
             workspaceRoot: { type: 'string' },
+            enabled: { type: 'boolean', description: '是否启用；停用后该 appId 无法再鉴权访问。', example: true },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
             defaults: { $ref: '#/components/schemas/AppDefaults' },
@@ -954,6 +1027,7 @@ export function createOpenApiSpec(config) {
           type: 'object',
           properties: {
             name: { type: 'string' },
+            enabled: { type: 'boolean', description: '启用/停用该 app；停用后其 appId 无法鉴权。' },
             defaults: { $ref: '#/components/schemas/AppDefaults' },
           },
         },
