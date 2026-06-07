@@ -144,6 +144,10 @@ function isAppRouteAllowed(method, pathname, appId) {
     return true;
   }
 
+  if (route === 'POST /api/chat') {
+    return true;
+  }
+
   if (route === `GET /api/apps/${appId}`) {
     return true;
   }

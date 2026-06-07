@@ -220,6 +220,35 @@ const es = new EventSource("/api/events");
 es.onmessage = (event) => console.log(JSON.parse(event.data));
 ```
 
+## 高级流式接口（推荐第三方接入用）
+
+为第三方提供「一次调用即流式输出」，避免先建会话再轮询。响应是 `text/event-stream`，用 POST 承载（隧道下实时、且能带鉴权头）。
+
+- `POST /api/chat` —— 建会话 + 发第一轮 + 流式返回，一个请求搞定。
+- `POST /api/sessions/:id/turns?stream=1` —— 已有会话发后续轮，只流式返回这一轮（无 30 条回放、无整 session 重负载）。
+
+事件按 `event:` 名区分：
+
+```text
+event: session  {sessionId, threadId, model, created}        首帧，拿到会话 id 供后续复用
+event: delta    {turnId, delta, seq}                         逐字增量
+event: image    {turnId, url, mimeType, byteSize, dataUrl?}  生成图片（≤256KB 内联 base64，否则给 url）
+event: usage    {turnId, tokenUsage}
+event: done     {turnId, status, finalText}                  终止帧
+event: error    {code, message}
+event: ping     {t}                                          15s 心跳
+```
+
+例（本机免鉴权；走域名时加 `-H "Authorization: Bearer <appId>"`）：
+
+```bash
+curl -N -X POST http://127.0.0.1:4555/api/chat \
+  -H "content-type: application/json" \
+  -d '{"text":"用一句话解释快速排序"}'
+```
+
+多轮：用首帧返回的 `sessionId`，对 `POST /api/sessions/<id>/turns?stream=1` 继续发即可。客户端断开会自动打断该轮（省 token）。生成图片时直接在流里发 `image` 事件，无需客户端解析路径再二次请求。`?wait=1`、`GET /api/events`、`GET /api/sessions/:id/events` 等旧接口保持不变。
+
 ## 设计边界
 
 这一版主要面向本机 + 隧道接入：

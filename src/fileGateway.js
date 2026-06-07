@@ -111,6 +111,28 @@ export function isPathInside(root, target) {
   return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
+const imagePathPattern =
+  /[A-Za-z]:\\[^\s"'`()<>|?*]+?\.(?:png|jpe?g|webp|gif)|[\w.\-/\\]+\.(?:png|jpe?g|webp|gif)/gi;
+
+// 从一段文本里抠出落在 root 工作目录内的图片文件路径（绝对路径）。
+// Codex 不发结构化图片事件，只把生成图片的路径写在回复文本里，所以服务端在这里统一识别，
+// 并用 isPathInside 兜住，避免把工作区外的文件暴露出去。
+export function extractWorkspaceImagePaths(text, root) {
+  if (!root) {
+    return [];
+  }
+  const found = new Set();
+  const matches = String(text || '').match(imagePathPattern) || [];
+  for (const raw of matches) {
+    const cleaned = raw.replace(/^[`'"(]+/, '').replace(/[`'")]+$/, '');
+    const abs = path.isAbsolute(cleaned) ? path.resolve(cleaned) : path.resolve(root, cleaned);
+    if (isPathInside(root, abs)) {
+      found.add(abs);
+    }
+  }
+  return [...found];
+}
+
 export function publicFileNameFromPath(filePath) {
   const normalized = String(filePath || '').replaceAll('\\', '/');
   return path.posix.basename(normalized) || 'image';

@@ -9,7 +9,7 @@ import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
-import { createImageUpload, isPathInside, resolveUploadAppId } from './fileGateway.js';
+import { createImageUpload, extractWorkspaceImagePaths, isPathInside, resolveUploadAppId } from './fileGateway.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
 import { createOpenApiSpec } from './openapi.js';
 import { SessionStore } from './sessionStore.js';
@@ -210,6 +210,11 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (route === 'POST /api/chat') {
+    await chatStream(req, res);
+    return;
+  }
+
   if (route === 'GET /api/models') {
     await codex.ensureStarted();
     const includeHidden = url.searchParams.get('includeHidden') === '1';
@@ -363,6 +368,14 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
   }
 
   if (req.method === 'POST' && action === 'turns') {
+    const wantsStream =
+      url.searchParams.get('stream') === '1' ||
+      String(req.headers.accept || '').toLowerCase().includes('text/event-stream');
+    if (wantsStream) {
+      const body = await readJsonBody(req);
+      await streamTurn(req, res, session, body, { created: false });
+      return;
+    }
     await startTurn(req, res, url, sessionId);
     return;
   }
@@ -456,6 +469,236 @@ async function startTurn(req, res, url, sessionId) {
   sendJson(res, 202, { session: summarySession(session), turn: result.turn });
 }
 
+// 高级接口：一个请求建会话 + 发第一轮 + 流式返回（无需先建会话、无需轮询）。
+async function chatStream(req, res) {
+  await codex.ensureStarted();
+  const body = await readJsonBody(req);
+  if (req.access?.scope === 'app') {
+    if (body.appId && body.appId !== req.access.appId) {
+      const error = new Error('当前 appId 不能为其他 APP 创建 session');
+      error.statusCode = 403;
+      throw error;
+    }
+    body.appId = req.access.appId;
+  }
+  const app = body.appId ? apps.require(body.appId) : null;
+  const request = normalizeSessionRequest(body, app);
+  const result = await codex.request('thread/start', {
+    model: request.model,
+    cwd: request.cwd,
+    approvalPolicy: request.approvalPolicy,
+    sandbox: request.sandbox,
+    serviceName: request.serviceName,
+    ephemeral: request.ephemeral,
+    experimentalRawEvents: request.experimentalRawEvents,
+    persistExtendedHistory: request.persistExtendedHistory,
+  });
+  const session = store.createSession({ thread: result.thread, request, config });
+  await persistState();
+  publish({ type: 'bridge.session.created', session: summarySession(session), receivedAt: new Date().toISOString() });
+  await streamTurn(req, res, session, body, { created: true });
+}
+
+// 在一个 session 上发一轮，并只把这一轮的输出以类型化 SSE 流式返回（无 30 条回放、无整 session 重负载）。
+// 关键：监听器必须在 await turn/start 之前挂上，否则会漏掉开头的 delta（bus 是同步 EventEmitter）。
+async function streamTurn(req, res, session, body, { created = false } = {}) {
+  await codex.ensureStarted();
+  const input = normalizeInput(body);
+  const appId = req.access?.scope === 'app' ? req.access.appId : session.appId || null;
+  const baseUrl = requestBaseUrl(req);
+
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  writeTypedSse(res, 'session', {
+    sessionId: session.id,
+    threadId: session.threadId,
+    appId: session.appId,
+    model: session.model,
+    cwd: session.cwd,
+    created,
+  });
+
+  let finished = false;
+  let activeTurnId = null;
+  let assistantText = '';
+  let seq = 0;
+  let heartbeat = null;
+  let safety = null;
+  const emittedImages = new Set();
+  const imageScans = [];
+
+  function scanImages(text, turnId) {
+    for (const absPath of extractWorkspaceImagePaths(text, session.cwd)) {
+      if (emittedImages.has(absPath)) {
+        continue;
+      }
+      emittedImages.add(absPath);
+      imageScans.push(
+        buildImageEvent(session, absPath, appId, turnId, baseUrl)
+          .then((event) => {
+            if (event && !finished) {
+              writeTypedSse(res, 'image', event);
+            }
+          })
+          .catch(() => {}),
+      );
+    }
+  }
+
+  function cleanup() {
+    bus.off('event', onEvent);
+    clearInterval(heartbeat);
+    clearTimeout(safety);
+  }
+
+  function finishStream(turn) {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    cleanup();
+    scanImages(assistantText, turn?.id ?? activeTurnId);
+    Promise.allSettled(imageScans).then(() => {
+      writeTypedSse(res, 'done', {
+        turnId: turn?.id ?? activeTurnId,
+        status: turn?.status === 'interrupted' ? 'interrupted' : 'completed',
+        finalText: assistantText,
+      });
+      res.end();
+    });
+  }
+
+  function failStream(code, message) {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    cleanup();
+    writeTypedSse(res, 'error', { code, message });
+    res.end();
+  }
+
+  function onEvent(event) {
+    if (finished || event.params?.threadId !== session.threadId) {
+      return;
+    }
+    const params = event.params || {};
+    if (event.method === 'item/agentMessage/delta') {
+      if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
+        return;
+      }
+      const delta = params.delta ?? '';
+      assistantText += delta;
+      writeTypedSse(res, 'delta', { turnId: params.turnId ?? activeTurnId, delta, seq: seq++ });
+    } else if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
+      scanImages(params.item.text || '', params.turnId ?? activeTurnId);
+    } else if (event.method === 'thread/tokenUsage/updated') {
+      writeTypedSse(res, 'usage', { turnId: params.turnId ?? activeTurnId, tokenUsage: params.tokenUsage ?? params.usage ?? null });
+    } else if (event.method === 'turn/completed') {
+      const turn = params.turn || {};
+      if (activeTurnId && turn.id && turn.id !== activeTurnId) {
+        return;
+      }
+      finishStream(turn);
+    }
+  }
+
+  bus.on('event', onEvent);
+  heartbeat = setInterval(() => {
+    if (!finished) {
+      writeTypedSse(res, 'ping', { t: new Date().toISOString() });
+    }
+  }, 15000);
+  safety = setTimeout(() => failStream('stream_timeout', '等待 turn 完成超时'), 10 * 60 * 1000);
+
+  res.on('close', () => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    cleanup();
+    if (activeTurnId) {
+      // 客户端断开就打断这一轮，别白烧 token。
+      codex.request('turn/interrupt', { threadId: session.threadId, turnId: activeTurnId }).catch(() => {});
+    }
+  });
+
+  let result;
+  try {
+    result = await codex.request('turn/start', {
+      threadId: session.threadId,
+      input,
+      approvalPolicy: body.approvalPolicy,
+      sandboxPolicy: body.sandboxPolicy,
+      model: body.model ?? session.model,
+      effort: body.effort ?? session.effort,
+    });
+  } catch (error) {
+    failStream('turn_start_failed', error.message);
+    return;
+  }
+
+  activeTurnId = result.turn.id;
+  store.addUserMessage(session, { input, turnId: activeTurnId });
+  if (!session.turns.some((turn) => turn.id === activeTurnId)) {
+    store.beginTurn(session, { turn: result.turn, input });
+  }
+  persistState().catch(() => {});
+  publish({
+    type: 'bridge.turn.started',
+    sessionId: session.id,
+    threadId: session.threadId,
+    turnId: activeTurnId,
+    receivedAt: new Date().toISOString(),
+  });
+}
+
+// 用请求自身的协议+host 拼绝对地址：经隧道进来是 https://bridge.kevinsu.xyz，本机是 http://127.0.0.1:4555。
+// 这样发给非局域网 App 的图片 url 可直接取用，不用客户端自己拼 base。
+function requestBaseUrl(req) {
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const proto = forwardedProto ? String(forwardedProto).split(',')[0].trim() : 'http';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `${config.server.host}:${config.server.port}`;
+  return `${proto}://${String(host).split(',')[0].trim()}`;
+}
+
+async function buildImageEvent(session, absPath, appId, turnId, baseUrl) {
+  let info;
+  try {
+    info = await stat(absPath);
+  } catch {
+    return null;
+  }
+  if (!info.isFile() || info.size === 0) {
+    return null;
+  }
+  const mimeType = contentType(absPath);
+  const params = new URLSearchParams({ path: absPath });
+  if (appId) {
+    params.set('appId', appId);
+  }
+  const event = {
+    turnId,
+    fileName: path.basename(absPath),
+    mimeType,
+    byteSize: info.size,
+    url: `${baseUrl}/api/sessions/${encodeURIComponent(session.id)}/files?${params.toString()}`,
+  };
+  if (info.size <= 256 * 1024) {
+    try {
+      const buffer = await readFile(absPath);
+      event.dataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
+    } catch {
+      // 内联失败不致命，url 仍可取图。
+    }
+  }
+  return event;
+}
+
 async function uploadImage(req, res) {
   const body = await readJsonBody(req);
   const appId = resolveUploadAppId({ access: req.access, body, headers: req.headers });
@@ -543,6 +786,11 @@ function openSse(res, sessionId) {
 function writeSse(res, payload) {
   res.write(`event: message\n`);
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+// 类型化 SSE：用 event 名区分（session/delta/image/usage/done/error/ping），比裸 message 更好消费。
+function writeTypedSse(res, event, payload) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 function normalizeSessionRequest(body, app = null) {
@@ -681,12 +929,14 @@ function apiDocumentation() {
       'POST /api/server-requests/:id/respond',
       'GET /api/sessions',
       'POST /api/sessions',
+      'POST /api/chat (SSE stream)',
       'GET /api/sessions/:id',
       'POST /api/sessions/:id/resume',
       'GET /api/sessions/:id/events',
       'GET /api/sessions/:id/files?path=<local-path>',
       'POST /api/sessions/:id/turns',
       'POST /api/sessions/:id/turns?wait=1',
+      'POST /api/sessions/:id/turns?stream=1 (SSE stream)',
       'POST /api/sessions/:id/interrupt',
       'POST /api/sessions/:id/steer',
       'POST /api/sessions/:id/archive',
