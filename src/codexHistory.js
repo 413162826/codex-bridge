@@ -21,6 +21,8 @@ const MAX_THREADS_PER_PROJECT = 200;
 const MAX_TRANSCRIPT_MESSAGES = 300;
 const MAX_MESSAGE_CHARS = 8000;
 const PREWARM_MARKER = '系统预热';
+// 有界并发：一次性并发打开成百上千个文件流会耗尽文件描述符（EMFILE）。
+const SCAN_CONCURRENCY = 24;
 
 export function resolveCodexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -80,12 +82,14 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
   // 用 readline 读到第一行即停，不会把整文件读进来。
   function readHeader(file) {
     return new Promise((resolve) => {
-      const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+      const stream = createReadStream(file, { encoding: 'utf8' });
+      const rl = createInterface({ input: stream, crlfDelay: Infinity });
       let settled = false;
       const finish = (value) => {
         if (settled) return;
         settled = true;
         rl.close();
+        stream.destroy(); // readline 不会关闭底层流，必须显式销毁，否则 fd 泄漏 → EMFILE
         resolve(value);
       };
       rl.on('line', (line) => {
@@ -98,20 +102,22 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
         }
       });
       rl.on('close', () => finish(null));
-      rl.on('error', () => finish(null));
+      stream.on('error', () => finish(null));
     });
   }
 
   // 取该对话第一条“真实用户消息”，作为列表标题/预览（跳过预热轮的系统消息）。
   function readFirstUserMessage(file) {
     return new Promise((resolve) => {
-      const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+      const stream = createReadStream(file, { encoding: 'utf8' });
+      const rl = createInterface({ input: stream, crlfDelay: Infinity });
       let settled = false;
       let scanned = 0;
       const finish = (value) => {
         if (settled) return;
         settled = true;
         rl.close();
+        stream.destroy(); // 同上：早退时必须销毁底层流，避免 fd 泄漏
         resolve(value);
       };
       rl.on('line', (line) => {
@@ -127,15 +133,24 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
         }
       });
       rl.on('close', () => finish(''));
-      rl.on('error', () => finish(''));
+      stream.on('error', () => finish(''));
     });
   }
 
   // 读完整对话，抽出有序的 user/agent 文本消息（与手机端展示一致：跳过推理/工具噪声）。
   function readTranscript(file) {
     return new Promise((resolve) => {
-      const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+      const stream = createReadStream(file, { encoding: 'utf8' });
+      const rl = createInterface({ input: stream, crlfDelay: Infinity });
       const messages = [];
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        rl.close();
+        stream.destroy();
+        resolve(messages.slice(-MAX_TRANSCRIPT_MESSAGES));
+      };
       rl.on('line', (line) => {
         try {
           const o = JSON.parse(line);
@@ -153,21 +168,18 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
           // 跳过坏行
         }
       });
-      const done = () => resolve(messages.slice(-MAX_TRANSCRIPT_MESSAGES));
       rl.on('close', done);
-      rl.on('error', done);
+      stream.on('error', done);
     });
   }
 
   async function buildIndex() {
     const { roots, hints } = readGlobalState();
     const files = await walkRollouts(sessionsDir);
-    const headers = await Promise.all(
-      files.map(async (file) => {
-        const header = await readHeader(file);
-        return header && header.cwd ? { ...header, file } : null;
-      }),
-    );
+    const headers = await mapLimit(files, SCAN_CONCURRENCY, async (file) => {
+      const header = await readHeader(file);
+      return header && header.cwd ? { ...header, file } : null;
+    });
 
     const registry = new Map(); // normPath -> project
     const ensureProject = (rawPath) => {
@@ -268,18 +280,16 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
       throw error;
     }
     const slice = project.threads.slice(0, MAX_THREADS_PER_PROJECT);
-    const data = await Promise.all(
-      slice.map(async (thread) => {
-        const preview = await readFirstUserMessage(thread.file);
-        return {
-          id: thread.id,
-          title: preview || '(无标题对话)',
-          preview,
-          startedAt: thread.startedAt,
-          cwd: thread.cwd,
-        };
-      }),
-    );
+    const data = await mapLimit(slice, SCAN_CONCURRENCY, async (thread) => {
+      const preview = await readFirstUserMessage(thread.file);
+      return {
+        id: thread.id,
+        title: preview || '(无标题对话)',
+        preview,
+        startedAt: thread.startedAt,
+        cwd: thread.cwd,
+      };
+    });
     return {
       project: { id: project.id, name: project.name, path: project.path, conversationCount: project.conversationCount },
       data,
@@ -378,6 +388,21 @@ function cleanForTitle(text) {
     return `🖼️ ${lines[lines.length - 1] || '图片生成'}`;
   }
   return s;
+}
+
+// 有界并发 map：最多同时跑 limit 个，避免一次性打开过多文件流耗尽 fd。
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index], index);
+    }
+  };
+  const size = Math.min(limit, items.length) || 0;
+  await Promise.all(Array.from({ length: size }, worker));
+  return results;
 }
 
 function asArray(value) {

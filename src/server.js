@@ -1231,11 +1231,33 @@ async function serveFile(res, target) {
     sendText(res, 404, 'Not Found');
     return;
   }
-  res.writeHead(200, {
-    'content-type': contentType(target),
-    'cache-control': 'no-store',
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(target);
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      fn(arg);
+    };
+    // 关键：必须处理读流的 'error'，否则未捕获的 error 事件会让整个进程崩溃（曾因 EMFILE 崩过）。
+    stream.on('error', (error) => {
+      if (res.headersSent) {
+        res.destroy(error);
+        settle(resolve);
+      } else {
+        settle(reject, error); // 头还没发：交给上层兜底成 500
+      }
+    });
+    stream.on('open', () => {
+      res.writeHead(200, { 'content-type': contentType(target), 'cache-control': 'no-store' });
+      stream.pipe(res);
+    });
+    stream.on('end', () => settle(resolve));
+    res.on('close', () => {
+      stream.destroy();
+      settle(resolve);
+    });
   });
-  createReadStream(target).pipe(res);
 }
 
 function contentType(filePath) {
