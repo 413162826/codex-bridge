@@ -332,11 +332,24 @@ button {
 }
 
 .drawer-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: 36px 1fr 36px;
   align-items: center;
-  justify-content: space-between;
-  padding: 4px 4px 12px;
+  padding: 4px 2px 12px;
   font-size: 18px;
+}
+
+.drawer-title {
+  text-align: center;
+  font-size: 17px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drawer-back {
+  width: 34px;
+  height: 34px;
 }
 
 .drawer-new {
@@ -387,6 +400,41 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 项目项：标题一行 + 右侧箭头，下面一行计数/时间 */
+.project-item .project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.project-item .chev {
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.project-item.muted {
+  opacity: 0.55;
+}
+
+/* 在某项目下「新建对话」入口 */
+.thread-new {
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: var(--accent);
+  border-radius: 14px;
+  padding: 11px 14px;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: left;
+}
+
+.thread-new:active {
+  background: #f0ece6;
 }
 
 .session-empty {

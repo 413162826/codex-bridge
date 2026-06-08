@@ -17,8 +17,10 @@ const els = {
   drawer: document.getElementById('drawer'),
   backdrop: document.getElementById('backdrop'),
   closeDrawer: document.getElementById('closeDrawer'),
+  drawerBack: document.getElementById('drawerBack'),
+  drawerTitle: document.getElementById('drawerTitle'),
   drawerNew: document.getElementById('drawerNew'),
-  sessionList: document.getElementById('sessionList'),
+  drawerList: document.getElementById('drawerList'),
   settingsBtn: document.getElementById('settingsBtn'),
   settingsDialog: document.getElementById('settingsDialog'),
   baseUrlInput: document.getElementById('baseUrlInput'),
@@ -32,8 +34,13 @@ const els = {
 const config = loadConfig();
 
 const state = {
-  sessions: [],
+  drawerView: 'projects', // 'projects' | 'threads'
+  projects: [],
+  currentProject: null,
+  threads: [],
   currentSessionId: null,
+  resumeNeeded: false, // 当前打开的是原生历史对话，发首句前需先 resume
+  newChatCwd: null, // 在某项目下新建对话时的目标工作目录
   messages: [],
   streaming: false,
 };
@@ -207,14 +214,32 @@ async function send(rawText, { image = false } = {}) {
   state.streaming = true;
   setComposerEnabled(false);
   hideWelcome();
-  els.hint.textContent = 'Codex 正在回复…';
 
+  // 进入的是原生历史对话：发首句前先把线程恢复到 bridge，再走正常的 turns 流。
+  if (state.currentSessionId && state.resumeNeeded) {
+    els.hint.textContent = '正在恢复对话…';
+    try {
+      await api('POST', `/api/threads/${encodeURIComponent(state.currentSessionId)}/resume`);
+      state.resumeNeeded = false;
+    } catch (error) {
+      els.hint.textContent = '';
+      state.streaming = false;
+      setComposerEnabled(true);
+      toast('恢复对话失败：' + error.message);
+      els.input.value = text; // 把字还回输入框，别丢
+      autoGrow();
+      return;
+    }
+  }
+
+  els.hint.textContent = 'Codex 正在回复…';
   addMessage({ role: 'user', text });
   const assistant = addMessage({ role: 'assistant', text: '', status: 'pending' });
   scrollToBottom();
 
-  const payload = { text: image ? buildImagePrompt(text) : text };
   const isNew = !state.currentSessionId;
+  const payload = { text: image ? buildImagePrompt(text) : text };
+  if (isNew && state.newChatCwd) payload.cwd = state.newChatCwd; // 在指定项目目录里新建
   const path = isNew
     ? '/api/chat'
     : `/api/sessions/${encodeURIComponent(state.currentSessionId)}/turns?stream=1`;
@@ -263,7 +288,7 @@ async function send(rawText, { image = false } = {}) {
     state.streaming = false;
     setComposerEnabled(true);
     els.hint.textContent = '';
-    if (isNew) loadSessions();
+    if (isNew) state.newChatCwd = null; // 会话已建立，后续走 turns
     scrollToBottom();
   }
 }
@@ -274,64 +299,150 @@ function setComposerEnabled(enabled) {
   els.imageBtn.disabled = !enabled;
 }
 
-// ---------- 会话列表 / 切换 ----------
-async function loadSessions() {
+// ---------- 项目 / 历史对话 ----------
+async function loadProjects() {
   try {
-    const res = await api('GET', '/api/sessions');
-    state.sessions = res.data || [];
+    const res = await api('GET', '/api/projects');
+    state.projects = res.data || [];
   } catch (error) {
-    state.sessions = [];
+    state.projects = [];
     toast(error.message);
   }
-  renderSessions();
+  if (state.drawerView === 'projects') renderDrawer();
 }
 
-function renderSessions() {
-  els.sessionList.innerHTML = '';
-  if (!state.sessions.length) {
-    const empty = document.createElement('div');
-    empty.className = 'session-empty';
-    empty.textContent = '还没有会话，发条消息就会出现在这里。';
-    els.sessionList.appendChild(empty);
+function renderDrawer() {
+  const list = els.drawerList;
+  list.innerHTML = '';
+
+  if (state.drawerView === 'threads' && state.currentProject) {
+    els.drawerBack.hidden = false;
+    els.drawerTitle.textContent = state.currentProject.name;
+
+    const newBtn = document.createElement('button');
+    newBtn.type = 'button';
+    newBtn.className = 'thread-new';
+    newBtn.textContent = '＋ 在此项目新建对话';
+    newBtn.addEventListener('click', () => newInProject(state.currentProject));
+    list.appendChild(newBtn);
+
+    if (!state.threads.length) {
+      list.appendChild(emptyHint('该项目还没有对话记录。'));
+      return;
+    }
+    for (const t of state.threads) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `session-item thread-item ${t.id === state.currentSessionId ? 'active' : ''}`;
+      const name = document.createElement('strong');
+      name.textContent = t.title || '(无标题对话)';
+      const meta = document.createElement('small');
+      meta.textContent = formatTime(t.startedAt);
+      btn.append(name, meta);
+      btn.addEventListener('click', () => openThread(t));
+      list.appendChild(btn);
+    }
     return;
   }
-  for (const s of state.sessions) {
+
+  // 项目列表
+  els.drawerBack.hidden = true;
+  els.drawerTitle.textContent = '项目';
+  if (!state.projects.length) {
+    list.appendChild(emptyHint('暂时没有读到项目历史。'));
+    return;
+  }
+  for (const p of state.projects) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `session-item ${s.id === state.currentSessionId ? 'active' : ''}`;
+    btn.className = `session-item project-item ${p.conversationCount ? '' : 'muted'}`;
+    const row = document.createElement('div');
+    row.className = 'project-row';
     const name = document.createElement('strong');
-    name.textContent = s.name || s.id;
-    const last = document.createElement('small');
-    last.textContent = s.lastMessage?.text || `${s.messageCount || 0} 条消息`;
-    btn.append(name, last);
-    btn.addEventListener('click', () => openSession(s.id));
-    els.sessionList.appendChild(btn);
+    name.textContent = p.name;
+    const chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = '›';
+    row.append(name, chev);
+    const meta = document.createElement('small');
+    meta.textContent =
+      `${p.conversationCount} 段对话` + (p.lastActivity ? ` · ${formatTime(p.lastActivity)}` : '');
+    btn.append(row, meta);
+    btn.addEventListener('click', () => openProject(p));
+    list.appendChild(btn);
   }
 }
 
-async function openSession(id) {
-  closeDrawer();
+function emptyHint(text) {
+  const el = document.createElement('div');
+  el.className = 'session-empty';
+  el.textContent = text;
+  return el;
+}
+
+async function openProject(project) {
+  state.currentProject = project;
+  state.drawerView = 'threads';
+  state.threads = [];
+  els.drawerBack.hidden = false;
+  els.drawerTitle.textContent = project.name;
+  els.drawerList.innerHTML = '<div class="session-empty">加载中…</div>';
+  try {
+    const res = await api('GET', `/api/projects/${encodeURIComponent(project.id)}/threads`);
+    state.threads = res.data || [];
+  } catch (error) {
+    state.threads = [];
+    toast(error.message);
+  }
+  if (state.drawerView === 'threads') renderDrawer();
+}
+
+function backToProjects() {
+  state.drawerView = 'projects';
+  state.currentProject = null;
+  renderDrawer();
+}
+
+async function openThread(thread) {
   if (state.streaming) {
     toast('正在回复中，稍候再切换');
     return;
   }
+  closeDrawer();
   try {
-    const res = await api('GET', `/api/sessions/${encodeURIComponent(id)}`);
-    const session = res.session;
-    state.currentSessionId = session.id;
+    const res = await api('GET', `/api/threads/${encodeURIComponent(thread.id)}`);
+    const detail = res.thread;
+    state.currentSessionId = detail.id;
+    state.resumeNeeded = true; // 发首句时才真正 resume
+    state.newChatCwd = null;
     clearMessages();
     hideWelcome();
-    setTitle(session.name);
-    for (const m of session.messages || []) {
+    setTitle(thread.title || detail.title || state.currentProject?.name);
+    for (const m of detail.messages || []) {
       if (m.role === 'assistant' && !String(m.text || '').trim()) continue;
       addMessage({ role: m.role, text: m.text || '', status: 'done' });
     }
     if (!state.messages.length) showWelcome();
-    renderSessions();
     scrollToBottom();
   } catch (error) {
     toast(error.message);
   }
+}
+
+function newInProject(project) {
+  if (state.streaming) {
+    toast('正在回复中，稍候再新建');
+    return;
+  }
+  state.newChatCwd = project.path;
+  state.currentSessionId = null;
+  state.resumeNeeded = false;
+  clearMessages();
+  showWelcome();
+  setTitle(`新对话 · ${project.name}`);
+  closeDrawer();
+  els.input.focus();
+  toast(`已选「${project.name}」，发消息即在此项目新建`);
 }
 
 function newSession() {
@@ -340,12 +451,29 @@ function newSession() {
     return;
   }
   state.currentSessionId = null;
+  state.resumeNeeded = false;
+  state.newChatCwd = null;
+  state.drawerView = 'projects';
+  state.currentProject = null;
   clearMessages();
   showWelcome();
   setTitle();
-  renderSessions();
   closeDrawer();
   els.input.focus();
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  if (d.toDateString() === now.toDateString()) return `今天 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`;
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 function setTitle(name) {
@@ -354,7 +482,10 @@ function setTitle(name) {
 
 // ---------- 抽屉 / 设置 ----------
 function openDrawer() {
-  loadSessions();
+  state.drawerView = 'projects';
+  state.currentProject = null;
+  renderDrawer();
+  loadProjects();
   els.backdrop.hidden = false;
   requestAnimationFrame(() => els.drawer.classList.add('open'));
   els.drawer.setAttribute('aria-hidden', 'false');
@@ -414,6 +545,7 @@ function bindEvents() {
 
   els.menuBtn.addEventListener('click', openDrawer);
   els.closeDrawer.addEventListener('click', closeDrawer);
+  els.drawerBack.addEventListener('click', backToProjects);
   els.backdrop.addEventListener('click', closeDrawer);
   els.newBtn.addEventListener('click', newSession);
   els.drawerNew.addEventListener('click', newSession);
@@ -426,7 +558,7 @@ function bindEvents() {
     saveConfig();
     els.settingsDialog.close();
     toast('已保存');
-    loadSessions();
+    loadProjects();
   });
 
   els.suggest.addEventListener('click', (e) => {
@@ -441,7 +573,7 @@ function bindEvents() {
 function init() {
   bindEvents();
   autoGrow();
-  loadSessions();
+  loadProjects();
 }
 
 init();

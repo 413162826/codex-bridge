@@ -64,13 +64,16 @@
     <div class="drawer-backdrop" id="backdrop" hidden></div>
     <aside class="drawer" id="drawer" aria-hidden="true">
       <div class="drawer-head">
-        <strong>会话</strong>
+        <button class="icon-btn drawer-back" id="drawerBack" type="button" aria-label="返回项目" hidden>
+          <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <strong class="drawer-title" id="drawerTitle">项目</strong>
         <button class="icon-btn" id="closeDrawer" type="button" aria-label="关闭">
           <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         </button>
       </div>
       <button class="drawer-new" id="drawerNew" type="button">＋ 新会话</button>
-      <div class="session-list" id="sessionList"></div>
+      <div class="session-list" id="drawerList"></div>
       <button class="drawer-settings" id="settingsBtn" type="button">⚙ 接入设置（地址 / appId）</button>
     </aside>
 

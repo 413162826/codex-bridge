@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
+import { createCodexHistory } from './codexHistory.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
 import { createImageUpload, extractWorkspaceImagePaths, isPathInside, resolveUploadAppId } from './fileGateway.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
@@ -26,6 +27,7 @@ const config = createRuntimeConfig();
 mergeConfig(config, persistedState.config);
 const apps = new AppRegistry({ apps: persistedState.apps });
 const store = new SessionStore({ sessions: persistedState.sessions });
+const history = createCodexHistory();
 const bus = new EventEmitter();
 bus.setMaxListeners(200);
 
@@ -183,6 +185,32 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // ===== Codex 原生历史：项目 / 历史对话 / 进入续聊（只读扫描 ~/.codex/sessions） =====
+  if (route === 'GET /api/projects') {
+    sendJson(res, 200, { data: await history.listProjects() });
+    return;
+  }
+
+  const projectThreadsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/threads$/);
+  if (req.method === 'GET' && projectThreadsMatch) {
+    const result = await history.listThreads(decodeURIComponent(projectThreadsMatch[1]));
+    sendJson(res, 200, result);
+    return;
+  }
+
+  const threadDetailMatch = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
+  if (req.method === 'GET' && threadDetailMatch) {
+    const thread = await history.getThread(decodeURIComponent(threadDetailMatch[1]));
+    sendJson(res, 200, { thread });
+    return;
+  }
+
+  const threadResumeMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/resume$/);
+  if (req.method === 'POST' && threadResumeMatch) {
+    await resumeNativeThread(req, res, decodeURIComponent(threadResumeMatch[1]));
+    return;
+  }
+
   if (route === 'GET /api/apps') {
     sendJson(res, 200, { data: apps.list() });
     return;
@@ -310,6 +338,41 @@ async function createSession(req, res) {
   sendJson(res, 201, { session });
   // 后台预热：把“新线程首轮 ~10s 的连接+前缀缓存”提前焐热，挪出用户首句的关键路径。
   prewarmSession(session);
+}
+
+// 进入一条原生历史对话续聊：用 rollout 的 id 作为 threadId 调 thread/resume，
+// 在该对话的真实 cwd 里恢复线程，并登记进 session store（让后续 /api/sessions/:id/turns 能用）。
+async function resumeNativeThread(req, res, threadId) {
+  await codex.ensureStarted();
+  const meta = await history.getThreadMeta(threadId);
+  if (!meta) {
+    const error = new Error(`未找到历史对话：${threadId}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  const existing = store.get(threadId);
+  const result = await codex.request('thread/resume', {
+    threadId,
+    cwd: meta.cwd,
+    approvalPolicy: config.codex.approvalPolicy,
+    sandbox: config.codex.sandbox,
+    model: config.codex.model,
+    persistExtendedHistory: true,
+    excludeTurns: false,
+  });
+  const claimedAppId = req.access?.scope === 'app' ? req.access.appId : existing?.appId ?? null;
+  const request = {
+    cwd: meta.cwd,
+    name: existing?.name || meta.projectName || threadId,
+    appId: claimedAppId,
+  };
+  const session = store.upsertResumedSession({ thread: result.thread, request, config });
+  // upsert 不改既有会话的 cwd/appId，这里显式落实：手机端 appId 认领该会话，cwd 用历史真实目录。
+  session.cwd = meta.cwd;
+  session.appId = claimedAppId;
+  await persistState();
+  publish({ type: 'bridge.session.resumed', session: summarySession(session), receivedAt: new Date().toISOString() });
+  sendJson(res, 200, { session: summarySession(session) });
 }
 
 async function handleAppRoute(req, res, appId) {
@@ -494,6 +557,11 @@ async function chatStream(req, res) {
   }
   const app = body.appId ? apps.require(body.appId) : null;
   const request = normalizeSessionRequest(body, app);
+  // 允许在某个“已知项目根”里新建对话（手机端「在此项目新建」）。只接受历史里出现过的项目根，
+  // 避免把任意路径作为可写工作目录。
+  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
+    request.cwd = body.cwd;
+  }
   const result = await codex.request('thread/start', {
     model: request.model,
     cwd: request.cwd,
@@ -1062,6 +1130,10 @@ function apiDocumentation() {
       'POST /api/server-requests/:id/respond',
       'GET /api/sessions',
       'POST /api/sessions',
+      'GET /api/projects',
+      'GET /api/projects/:id/threads',
+      'GET /api/threads/:id',
+      'POST /api/threads/:id/resume',
       'POST /api/chat (SSE stream)',
       'GET /api/sessions/:id',
       'POST /api/sessions/:id/resume',

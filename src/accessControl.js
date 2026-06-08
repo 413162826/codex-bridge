@@ -160,6 +160,20 @@ function isAppRouteAllowed(method, pathname, appId) {
     return true;
   }
 
+  // Codex 原生历史：项目列表 / 项目内对话 / 单条对话详情 / 进入续聊。
+  if (route === 'GET /api/projects') {
+    return true;
+  }
+  if (method === 'GET' && /^\/api\/projects\/[^/]+\/threads$/.test(pathname)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/api\/threads\/[^/]+$/.test(pathname)) {
+    return true;
+  }
+  if (method === 'POST' && /^\/api\/threads\/[^/]+\/resume$/.test(pathname)) {
+    return true;
+  }
+
   const sessionRoute = pathname.match(/^\/api\/sessions\/[^/]+(?:\/([^/]+))?$/);
   if (!sessionRoute) {
     return false;
