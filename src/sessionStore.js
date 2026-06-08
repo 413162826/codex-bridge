@@ -5,6 +5,8 @@ export class SessionStore {
     this.sessions = new Map();
     this.events = [];
     this.maxEventsPerSession = maxEventsPerSession;
+    // 预热轮(prewarm)的 turnId：这些轮只为焐热连接/前缀缓存，不计入可见会话与事件流。
+    this.ephemeralTurnIds = new Set();
     for (const session of sessions) {
       const normalized = normalizePersistedSession(session);
       if (normalized) {
@@ -38,6 +40,7 @@ export class SessionStore {
       events: [],
       activeTurnId: null,
       lastError: null,
+      lastNotice: null,
     };
     this.sessions.set(threadId, session);
     return session;
@@ -96,6 +99,7 @@ export class SessionStore {
       events: session.events.slice(-80),
       activeTurnId: session.activeTurnId,
       lastError: session.lastError,
+      lastNotice: session.lastNotice ?? null,
       tokenUsage: session.tokenUsage,
     }));
   }
@@ -201,12 +205,42 @@ export class SessionStore {
     return normalized;
   }
 
+  registerEphemeralTurn(turnId) {
+    if (turnId) {
+      this.ephemeralTurnIds.add(turnId);
+    }
+  }
+
+  isEphemeralTurn(turnId) {
+    return Boolean(turnId) && this.ephemeralTurnIds.has(turnId);
+  }
+
   applyNotification(event) {
-    this.addEvent(event);
     const params = event.params || {};
+    const eventTurnId = params.turnId || params.turn?.id || null;
+
+    // 预热轮：完全不记录(不建可见 turn/message、不入事件流)，结束时清理登记。
+    if (eventTurnId && this.ephemeralTurnIds.has(eventTurnId)) {
+      if (event.method === 'turn/completed') {
+        this.ephemeralTurnIds.delete(eventTurnId);
+        const session = this.sessions.get(params.threadId);
+        if (session) {
+          session.prewarming = false;
+        }
+      }
+      return;
+    }
+
+    this.addEvent(event);
 
     if (event.method === 'turn/started' && params.threadId && params.turn) {
       const session = this.sessions.get(params.threadId);
+      if (session && session.prewarming && !session.prewarmTurnId) {
+        // 这是该会话的预热轮：登记为 ephemeral，不建可见 turn/message。
+        session.prewarmTurnId = params.turn.id;
+        this.ephemeralTurnIds.add(params.turn.id);
+        return;
+      }
       if (session && !session.turns.some((turn) => turn.id === params.turn.id)) {
         this.beginTurn(session, { turn: params.turn, input: null });
       }
@@ -218,6 +252,24 @@ export class SessionStore {
 
     if (event.method === 'turn/completed') {
       this.completeTurn(params);
+    }
+
+    // 记录/清除“连接波动”提示：让前端能区分“网络重连”与“模型在思考”。
+    const notice = classifyConnectionNotice(event.method, params);
+    if (notice && params.threadId) {
+      const session = this.sessions.get(params.threadId);
+      if (session) {
+        session.lastNotice = { ...notice, at: event.receivedAt };
+        session.updatedAt = event.receivedAt;
+      }
+    } else if (
+      (event.method === 'item/agentMessage/delta' || event.method === 'turn/completed') &&
+      params.threadId
+    ) {
+      const session = this.sessions.get(params.threadId);
+      if (session && session.lastNotice) {
+        session.lastNotice = null;
+      }
     }
 
     if (event.method === 'thread/status/changed') {
@@ -266,6 +318,7 @@ function normalizePersistedSession(session) {
     events: Array.isArray(session.events) ? session.events.slice(-500) : [],
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
+    lastNotice: null,
     tokenUsage: session.tokenUsage,
   };
 
@@ -305,6 +358,47 @@ function normalizePersistedTurn(turn) {
     assistantMessageId: turn.assistantMessageId,
     turn: turn.turn,
   };
+}
+
+// 把 codex 的 error/warning 通知归类成“连接层提示”，便于让调用方区分
+// “网络连接超时/重连”与“模型思考/加载提示词”。无法归类则返回 null。
+export function classifyConnectionNotice(method, params = {}) {
+  const message = params?.error?.message || params?.message || '';
+  const detail = params?.error?.additionalDetails || '';
+  const errorInfo = params?.error?.codexErrorInfo || {};
+  const streamDisconnected =
+    Boolean(errorInfo.responseStreamDisconnected) ||
+    /reconnect|stream disconnected|disconnected before completion/i.test(message);
+  const fellBackToHttps = /falling back from websockets to https/i.test(message);
+
+  if (method === 'warning' && fellBackToHttps) {
+    return {
+      kind: 'transport_fallback',
+      severity: 'info',
+      transport: 'https',
+      reason: 'websocket_failed',
+      willRetry: false,
+      message: '已从 WebSocket 回退到 HTTPS 传输，正在继续',
+      detail,
+    };
+  }
+
+  if (method === 'error' && (streamDisconnected || params?.willRetry)) {
+    const counter = /(\d+)\s*\/\s*(\d+)/.exec(message);
+    return {
+      kind: 'reconnecting',
+      severity: 'warning',
+      transport: 'websocket',
+      reason: 'connection_timeout',
+      attempt: counter ? Number(counter[1]) : null,
+      maxAttempts: counter ? Number(counter[2]) : null,
+      willRetry: params?.willRetry !== false,
+      message: message || '与模型服务的连接中断，正在重连',
+      detail,
+    };
+  }
+
+  return null;
 }
 
 function previewName(text) {

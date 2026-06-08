@@ -236,6 +236,16 @@ async function send(rawText, { image = false } = {}) {
           renderMessage(assistant);
           scrollIfNear();
         }
+      } else if (event === 'notice') {
+        // 连接波动（重连/回退 HTTPS）：提示这是网络超时而非模型在想。
+        if (data.kind === 'reconnecting') {
+          const counter = data.attempt && data.maxAttempts ? ` ${data.attempt}/${data.maxAttempts}` : '';
+          els.hint.textContent = `连接中断，重连中${counter}…（网络超时，非模型耗时）`;
+        } else if (data.kind === 'transport_fallback') {
+          els.hint.textContent = '连接回退到 HTTPS，正在继续…';
+        } else {
+          els.hint.textContent = data.message || '连接波动，正在恢复…';
+        }
       } else if (event === 'error') {
         assistant.error = data.message || '出错了';
         renderMessage(assistant);

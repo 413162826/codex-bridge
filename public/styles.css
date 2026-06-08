@@ -594,6 +594,16 @@ textarea:focus {
   animation: blink 1s steps(2, start) infinite;
 }
 
+.message.notice {
+  background: #fff4e0;
+  color: #8a5a00;
+  font-size: 0.9em;
+}
+
+.message.notice.streaming::after {
+  content: "";
+}
+
 @keyframes blink {
   to {
     visibility: hidden;

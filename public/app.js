@@ -440,10 +440,36 @@ function renderConversation() {
   for (const message of session.messages || []) {
     const item = document.createElement('div');
     item.className = `message ${message.role} ${message.status === 'streaming' ? 'streaming' : ''}`;
-    item.textContent = message.text || (message.role === 'assistant' ? '...' : '');
+    let text = message.text;
+    if (!text && message.role === 'assistant') {
+      if (message.status === 'streaming' && session.lastNotice) {
+        text = formatNotice(session.lastNotice);
+        item.classList.add('notice');
+      } else {
+        text = '...';
+      }
+    }
+    item.textContent = text || (message.role === 'assistant' ? '...' : '');
     els.messages.appendChild(item);
   }
   els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+function formatNotice(notice) {
+  if (!notice) {
+    return '...';
+  }
+  if (notice.kind === 'reconnecting') {
+    const counter = notice.attempt && notice.maxAttempts ? ` ${notice.attempt}/${notice.maxAttempts}` : '';
+    return `⚠ 与模型服务的连接中断，正在重连${counter}…（网络连接超时，非模型耗时）`;
+  }
+  if (notice.kind === 'transport_fallback') {
+    return '↩ 已从 WebSocket 回退到 HTTPS，正在继续…';
+  }
+  if (notice.kind === 'error') {
+    return `⚠ ${notice.message || '模型服务返回错误'}`;
+  }
+  return notice.message || '...';
 }
 
 function renderAppEditor() {

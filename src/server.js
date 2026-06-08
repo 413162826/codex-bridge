@@ -12,7 +12,7 @@ import { createRuntimeConfig, mergeConfig } from './config.js';
 import { createImageUpload, extractWorkspaceImagePaths, isPathInside, resolveUploadAppId } from './fileGateway.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
 import { createOpenApiSpec } from './openapi.js';
-import { SessionStore } from './sessionStore.js';
+import { SessionStore, classifyConnectionNotice } from './sessionStore.js';
 import { loadBridgeState, saveBridgeState } from './stateStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,7 +47,7 @@ function createClient() {
 function wireClient(client) {
   client.on('notification', (event) => {
     store.applyNotification(event);
-    persistState().catch((error) => publish({ type: 'bridge.persist.error', error: error.message }));
+    schedulePersist();
     publish({ type: 'codex.notification', ...event });
   });
 
@@ -308,6 +308,8 @@ async function createSession(req, res) {
   await persistState();
   publish({ type: 'bridge.session.created', session: summarySession(session), receivedAt: new Date().toISOString() });
   sendJson(res, 201, { session });
+  // 后台预热：把“新线程首轮 ~10s 的连接+前缀缓存”提前焐热，挪出用户首句的关键路径。
+  prewarmSession(session);
 }
 
 async function handleAppRoute(req, res, appId) {
@@ -440,6 +442,7 @@ async function startTurn(req, res, url, sessionId) {
   assertSessionAccess(req, session);
   const body = await readJsonBody(req);
   const input = normalizeInput(body);
+  await settlePrewarm(session);
   const wait = url.searchParams.get('wait') === '1';
   const completionPromise = wait ? waitForTurnCompleted(session.threadId) : null;
   const result = await codex.request('turn/start', {
@@ -511,6 +514,9 @@ async function chatStream(req, res) {
 // 关键：监听器必须在 await turn/start 之前挂上，否则会漏掉开头的 delta（bus 是同步 EventEmitter）。
 async function streamTurn(req, res, session, body, { created = false } = {}) {
   await codex.ensureStarted();
+  // 先把可能在跑的预热轮收尾（让出线程），且必须在挂 bus 监听器之前，
+  // 否则预热轮被打断时的 turn/completed 会被这条流误当成真实轮的完成。
+  await settlePrewarm(session);
   const input = normalizeInput(body);
   const appId = req.access?.scope === 'app' ? req.access.appId : session.appId || null;
   const baseUrl = requestBaseUrl(req);
@@ -606,6 +612,24 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
       scanImages(params.item.text || '', params.turnId ?? activeTurnId);
     } else if (event.method === 'thread/tokenUsage/updated') {
       writeTypedSse(res, 'usage', { turnId: params.turnId ?? activeTurnId, tokenUsage: params.tokenUsage ?? params.usage ?? null });
+    } else if (event.method === 'error' || event.method === 'warning') {
+      // 把“连接中断/重连/回退 HTTPS”透传给调用方，让其知道这是网络连接超时，
+      // 而非模型在思考或加载提示词。无法归类的 error 也兜底透传，避免静默卡住。
+      const notice = classifyConnectionNotice(event.method, params);
+      if (notice) {
+        writeTypedSse(res, 'notice', { turnId: params.turnId ?? activeTurnId, at: new Date().toISOString(), ...notice });
+      } else if (event.method === 'error') {
+        writeTypedSse(res, 'notice', {
+          turnId: params.turnId ?? activeTurnId,
+          at: new Date().toISOString(),
+          kind: 'error',
+          severity: 'error',
+          reason: 'codex_error',
+          willRetry: params.willRetry === true,
+          message: params?.error?.message || '模型服务返回错误',
+          detail: params?.error?.additionalDetails || '',
+        });
+      }
     } else if (event.method === 'turn/completed') {
       const turn = params.turn || {};
       if (activeTurnId && turn.id && turn.id !== activeTurnId) {
@@ -655,7 +679,7 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
   if (!session.turns.some((turn) => turn.id === activeTurnId)) {
     store.beginTurn(session, { turn: result.turn, input });
   }
-  persistState().catch(() => {});
+  schedulePersist();
   publish({
     type: 'bridge.turn.started',
     sessionId: session.id,
@@ -729,6 +753,106 @@ async function serveSessionFile(req, res, url, session) {
     throw error;
   }
   await serveFile(res, target);
+}
+
+// ===== 新会话首轮预热（方案 A） =====
+// codex 每个新线程的“首轮 ~10s”花在建立到模型后端的连接 + 处理/缓存大段静态前缀
+// (AGENTS.md/技能/环境)上，且不跨线程复用。建会话后立刻在后台发一个一次性预热轮，把这笔
+// 开销提前焐热；用户真正首句到达时，若预热已就绪则直接走热路径(~3s)，若还没好则打断预热、
+// 按冷启动走(不比现状差)。预热轮登记为 ephemeral，不进入可见会话与历史。
+const PREWARM_ENABLED = process.env.BRIDGE_PREWARM !== '0';
+const PREWARM_INPUT = [
+  { type: 'text', text: '（系统预热，无需理会：只回复一个字“好”，不要调用任何工具或读写文件）' },
+];
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function prewarmSession(session) {
+  if (!PREWARM_ENABLED || !session || session.ephemeral || session._prewarm) {
+    return;
+  }
+  const marker = { turnId: null, warmReady: false, done: false, promise: null };
+  session._prewarm = marker;
+  session.prewarming = true;
+
+  marker.promise = (async () => {
+    let onNote = null;
+    try {
+      const result = await codex.request('turn/start', {
+        threadId: session.threadId,
+        input: PREWARM_INPUT,
+        model: session.model,
+        effort: 'low',
+      });
+      marker.turnId = result.turn.id;
+      store.registerEphemeralTurn(marker.turnId); // 兜底：通知若早到已在 store 端登记
+
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+        // 30s 还没结束（很可能撞上 WS 重连风暴）→ 强制打断，让线程尽快空出，
+        // 避免“预热标记为 done 但 codex 线程仍占用、真实轮 turn/start 冲突”。
+        const watchdog = setTimeout(() => {
+          codex.request('turn/interrupt', { threadId: session.threadId, turnId: marker.turnId }).catch(() => {});
+        }, 30000);
+        // 极端兜底：始终等不到 turn/completed 也别永久挂着监听器。
+        const backstop = setTimeout(() => {
+          clearTimeout(watchdog);
+          finish();
+        }, 180000);
+        onNote = (event) => {
+          if (event.params?.threadId !== session.threadId) {
+            return;
+          }
+          const tid = event.params?.turnId || event.params?.turn?.id;
+          if (tid !== marker.turnId) {
+            return;
+          }
+          if (event.method === 'item/agentMessage/delta' && !marker.warmReady) {
+            // 出字即说明连接已通、前缀已被后端处理/缓存 —— 焐热达成，打断省 token。
+            marker.warmReady = true;
+            codex.request('turn/interrupt', { threadId: session.threadId, turnId: marker.turnId }).catch(() => {});
+          }
+          if (event.method === 'turn/completed') {
+            clearTimeout(watchdog);
+            clearTimeout(backstop);
+            finish();
+          }
+        };
+        codex.on('notification', onNote);
+      });
+    } catch {
+      // 预热失败不影响正常使用。
+    } finally {
+      if (onNote) {
+        codex.off('notification', onNote);
+      }
+      marker.done = true;
+      session.prewarming = false;
+    }
+  })();
+}
+
+// 真实轮开始前调用：确保正在跑的预热轮已让出线程（codex 同一线程只允许一个活动 turn）。
+async function settlePrewarm(session) {
+  const marker = session?._prewarm;
+  if (!marker || marker.done) {
+    return;
+  }
+  // 等 turnId 就绪（turn/start 刚发出、响应未回时的极短窗口）。
+  for (let i = 0; i < 60 && !marker.turnId && !marker.done; i += 1) {
+    await delay(50);
+  }
+  if (marker.turnId && !marker.done) {
+    await codex.request('turn/interrupt', { threadId: session.threadId, turnId: marker.turnId }).catch(() => {});
+  }
+  // 等预热轮真正结束（收到 turn/completed），线程空出后真实轮才能安全开始。
+  await Promise.race([marker.promise, delay(8000)]).catch(() => {});
 }
 
 function waitForTurnCompleted(threadId, timeoutMs = 10 * 60 * 1000) {
@@ -953,15 +1077,59 @@ function apiDocumentation() {
   };
 }
 
-async function persistState() {
-  await saveBridgeState({
+// 持久化：单飞 + 合并 + 防抖。
+// 旧实现在每个流式 delta 上都 fire-and-forget 全量写盘，导致多个 writeFile 并发竞争
+// 同一文件、把状态文件写花（尾部残留垃圾），还把事件循环/磁盘打满。
+// 现在：同一时刻只有一次写在进行；写盘期间产生的新改动会被合并进收尾的下一次写；
+// 高频路径用 schedulePersist() 防抖，关键端点用 persistState() 立即落盘。
+let persistWriting = false;
+let persistDirty = false;
+let persistDebounceTimer = null;
+
+function buildPersistPayload() {
+  return {
     config: {
       codex: config.codex,
       ui: config.ui,
     },
     apps: apps.toJSON(),
     sessions: store.toJSON(),
-  });
+  };
+}
+
+async function persistState() {
+  if (persistWriting) {
+    // 已有写在进行：标脏，让进行中的循环收尾时再写一遍，保证最后状态不丢。
+    persistDirty = true;
+    return;
+  }
+  if (persistDebounceTimer) {
+    clearTimeout(persistDebounceTimer);
+    persistDebounceTimer = null;
+  }
+  persistWriting = true;
+  try {
+    do {
+      persistDirty = false;
+      await saveBridgeState(buildPersistPayload());
+    } while (persistDirty);
+  } catch (error) {
+    publish({ type: 'bridge.persist.error', error: error.message });
+  } finally {
+    persistWriting = false;
+  }
+}
+
+// 高频路径（每条 codex 通知/每个 delta）用这个：最多每 ~750ms 落盘一次。
+function schedulePersist(delayMs = 750) {
+  persistDirty = true;
+  if (persistWriting || persistDebounceTimer) {
+    return;
+  }
+  persistDebounceTimer = setTimeout(() => {
+    persistDebounceTimer = null;
+    persistState();
+  }, delayMs);
 }
 
 async function serveStatic(req, res, url) {
