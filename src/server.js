@@ -757,7 +757,7 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
   });
 }
 
-// 用请求自身的协议+host 拼绝对地址：经隧道进来是 https://bridge.kevinsu.xyz，本机是 http://127.0.0.1:4555。
+// 用请求自身的协议+host 拼绝对地址：经隧道进来是 https://bridge.example.com，本机是 http://127.0.0.1:4555。
 // 这样发给非局域网 App 的图片 url 可直接取用，不用客户端自己拼 base。
 function requestBaseUrl(req) {
   const forwardedProto = req.headers['x-forwarded-proto'];

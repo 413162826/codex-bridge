@@ -10,9 +10,9 @@
   加 -InstallService 时再把它装成开机自启的 Windows 服务（需管理员）。
 
 .EXAMPLE
-  .\scripts\setup-cloudflare-tunnel.ps1 -Hostname bridge.kevinsu.xyz
+  .\scripts\setup-cloudflare-tunnel.ps1 -Hostname bridge.example.com
   # 测通后，管理员 PowerShell：
-  .\scripts\setup-cloudflare-tunnel.ps1 -Hostname bridge.kevinsu.xyz -InstallService
+  .\scripts\setup-cloudflare-tunnel.ps1 -Hostname bridge.example.com -InstallService
 #>
 [CmdletBinding()]
 param(
