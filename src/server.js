@@ -350,6 +350,7 @@ async function createSession(req, res) {
 // 在该对话的真实 cwd 里恢复线程，并登记进 session store（让后续 /api/sessions/:id/turns 能用）。
 async function resumeNativeThread(req, res, threadId) {
   await codex.ensureStarted();
+  const body = await readJsonBody(req);
   const meta = await history.getThreadMeta(threadId);
   if (!meta) {
     const error = new Error(`未找到历史对话：${threadId}`);
@@ -366,7 +367,8 @@ async function resumeNativeThread(req, res, threadId) {
     persistExtendedHistory: true,
     excludeTurns: false,
   });
-  const claimedAppId = req.access?.scope === 'app' ? req.access.appId : existing?.appId ?? null;
+  // app scope 的 appId 最权威；本机管理员调用没有 scope，则用 body.appId 认领（让续聊归到调用方的 app）。
+  const claimedAppId = (req.access?.scope === 'app' ? req.access.appId : null) ?? body.appId ?? existing?.appId ?? null;
   const request = {
     cwd: meta.cwd,
     name: existing?.name || meta.projectName || threadId,
