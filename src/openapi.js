@@ -277,6 +277,88 @@ export function createOpenApiSpec(config) {
           },
         },
       },
+      '/api/complete': {
+        post: {
+          tags: ['High-level'],
+          summary: '无状态一次性补全（不建 session）',
+          description: [
+            '一次性 AI 任务的统一入口：建临时 `ephemeral` thread → 跑一轮 → 返回结果 → 丢弃 thread。',
+            '',
+            '与 `/api/chat` 的区别：**这条调用不进 `/api/sessions`、不写 `bridge-state.json`、不留 codex 历史**。',
+            '适合“生成一张图 / 写个文档 / 抽取或生成 JSON”这类做完即弃、结果才是产物的小功能。',
+            '',
+            '- 传 `outputSchema`（JSON Schema）时下发结构化输出，返回里附带兜底解析后的 `parsed`。',
+            '- 助手文本里若生成了工作目录内的图片，统一通过 `artifacts` 返回（含绝对 `path`；≤256KB 附 `dataUrl`）。',
+            '- 默认非流式返回 JSON；`stream:true` 或 `?stream=1` 改走 `text/event-stream`（事件：`start`/`delta`/`artifact`/`done`/`error`/`ping`）。',
+          ].join('\n'),
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    appId: { type: 'string', description: '调用方应用身份；决定工作目录与作用域。' },
+                    text: { type: 'string', description: '快捷输入；与 `prompt` / `input` 三选一。' },
+                    prompt: { type: 'string', description: '同 `text`。' },
+                    input: {
+                      type: 'array',
+                      description: '结构化输入项（文本 / 本地图片等），与 `text` 互斥。',
+                      items: { type: 'object' },
+                    },
+                    outputSchema: {
+                      type: 'object',
+                      description: '可选 JSON Schema；下发后模型按结构化输出，返回里附 `parsed`。',
+                    },
+                    model: { type: 'string' },
+                    effort: { type: 'string', enum: ['low', 'medium', 'high'] },
+                    cwd: { type: 'string', description: '可选；仅接受历史里出现过的项目根。' },
+                    stream: { type: 'boolean', description: 'true 改走 SSE 流式。' },
+                  },
+                },
+                example: {
+                  text: '把这段话压缩成不超过 20 字的标题：……',
+                  appId: '0322f41b-561e-43d0-b561-96ed72110918',
+                  effort: 'low',
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: '非流式 JSON（`stream` 未开）或 SSE 流（`stream:true`）。',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      status: { type: 'string', enum: ['completed', 'interrupted'] },
+                      text: { type: 'string' },
+                      parsed: { description: '传了 outputSchema 时的解析结果，解析失败为 null。' },
+                      parseError: { type: 'string' },
+                      artifacts: { type: 'array', items: { type: 'object' } },
+                    },
+                  },
+                  example: {
+                    status: 'completed',
+                    text: '{"title":"工作台每日复盘页设计"}',
+                    parsed: { title: '工作台每日复盘页设计' },
+                    artifacts: [],
+                  },
+                },
+                'text/event-stream': {
+                  schema: {
+                    type: 'string',
+                    example:
+                      'event: start\\ndata: {"threadId":"019e..."}\\n\\nevent: delta\\ndata: {"delta":"...","seq":0}\\n\\nevent: done\\ndata: {"status":"completed","finalText":"..."}\\n\\n',
+                  },
+                },
+              },
+            },
+            ...errorResponse(),
+          },
+        },
+      },
       '/api/sessions': {
         get: {
           tags: ['Sessions'],

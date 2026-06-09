@@ -9,6 +9,7 @@ import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
 import { createCodexHistory } from './codexHistory.js';
+import { toStrictJsonSchema, tryParseJson } from './complete.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
 import { createImageUpload, extractWorkspaceImagePaths, isPathInside, resolveUploadAppId } from './fileGateway.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
@@ -240,6 +241,11 @@ async function handleApi(req, res, url) {
 
   if (route === 'POST /api/chat') {
     await chatStream(req, res);
+    return;
+  }
+
+  if (route === 'POST /api/complete') {
+    await completeTask(req, res, url);
     return;
   }
 
@@ -757,6 +763,308 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
   });
 }
 
+// ===== 无状态结构化补全 /api/complete =====
+// 一次性 AI 任务（生成图、写文档、抽取/生成 JSON 等）的统一入口：
+//   建临时 ephemeral thread → 跑一轮 → 返回结果 → 丢弃 thread。
+// 关键：全程不 createSession、不 persist —— 这条调用不进 /api/sessions、不写 bridge-state.json。
+// 默认非流式返回 { status, text, parsed?, artifacts[] }；stream:true / ?stream=1 走类型化 SSE。
+async function completeTask(req, res, url) {
+  await codex.ensureStarted();
+  const body = await readJsonBody(req);
+
+  // app 作用域：与 chatStream 同款，app key 只能为自己发起。
+  if (req.access?.scope === 'app') {
+    if (body.appId && body.appId !== req.access.appId) {
+      const error = new Error('当前 appId 不能为其他 APP 发起 complete');
+      error.statusCode = 403;
+      throw error;
+    }
+    body.appId = req.access.appId;
+  }
+
+  const app = body.appId ? apps.require(body.appId) : null;
+  const request = normalizeSessionRequest(body, app);
+  // 仅允许把 cwd 指到“历史里出现过的项目根”，避免把任意路径当可写工作目录。
+  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
+    request.cwd = body.cwd;
+  }
+
+  const input = normalizeInput(body);
+  const hasContent = input.some((item) => item.type !== 'text' || String(item.text || '').trim());
+  if (!hasContent) {
+    const error = new Error('complete 需要非空的 input / text / prompt');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const wantsStream =
+    body.stream === true ||
+    url.searchParams.get('stream') === '1' ||
+    String(req.headers.accept || '').toLowerCase().includes('text/event-stream');
+
+  // 临时 thread：强制 ephemeral，绝不写 codex 历史。
+  const started = await codex.request('thread/start', {
+    model: request.model,
+    cwd: request.cwd,
+    approvalPolicy: request.approvalPolicy,
+    sandbox: request.sandbox,
+    serviceName: request.serviceName,
+    ephemeral: true,
+    experimentalRawEvents: request.experimentalRawEvents,
+    persistExtendedHistory: false,
+  });
+
+  const ctx = {
+    threadId: started.thread.id,
+    cwd: request.cwd,
+    appId: req.access?.scope === 'app' ? req.access.appId : body.appId || null,
+    baseUrl: requestBaseUrl(req),
+    input,
+    outputSchema: body.outputSchema,
+    model: body.model ?? request.model,
+    effort: body.effort ?? request.effort,
+    approvalPolicy: body.approvalPolicy,
+    sandboxPolicy: body.sandboxPolicy,
+  };
+
+  if (wantsStream) {
+    await streamComplete(req, res, ctx);
+  } else {
+    await awaitComplete(req, res, ctx);
+  }
+}
+
+// 在临时 thread 上发起一轮并下发结构化输出（outputSchema）——这正是流式 turns 路径之前缺的能力。
+async function startEphemeralTurn(ctx) {
+  const result = await codex.request('turn/start', {
+    threadId: ctx.threadId,
+    input: ctx.input,
+    approvalPolicy: ctx.approvalPolicy,
+    sandboxPolicy: ctx.sandboxPolicy,
+    model: ctx.model,
+    effort: ctx.effort,
+    // strict 模式规整：调用方传普通 JSON Schema 即可，这里补齐 additionalProperties/required。
+    outputSchema: ctx.outputSchema ? toStrictJsonSchema(ctx.outputSchema) : undefined,
+  });
+  return result.turn.id;
+}
+
+// 跑一轮并累计助手文本：监听器必须在 turn/start 之前挂上，否则会漏掉开头的 delta（bus 是同步 EventEmitter）。
+// 不依赖 SessionStore；resolve { status, text, turnId }。
+function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
+  const { threadId } = ctx;
+  return new Promise((resolve) => {
+    let streamedText = '';
+    const completedTexts = [];
+    let activeTurnId = null;
+    let settled = false;
+    let safety = null;
+
+    // 最终文本优先用 item/completed 的权威全文（结构化输出常常一次性给完、无逐字 delta）；
+    // 没有 completed 文本时才退回累计的 delta。
+    function finalText() {
+      return completedTexts.length ? completedTexts.join('\n') : streamedText;
+    }
+
+    function done(status) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      bus.off('event', onEvent);
+      clearTimeout(safety);
+      resolve({ status, text: finalText(), turnId: activeTurnId });
+    }
+
+    function onEvent(event) {
+      if (settled || event.params?.threadId !== threadId) {
+        return;
+      }
+      const params = event.params || {};
+      if (event.method === 'item/agentMessage/delta') {
+        if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
+          return;
+        }
+        const delta = params.delta ?? '';
+        streamedText += delta;
+        onDelta?.(delta, params.turnId ?? activeTurnId);
+      } else if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
+        if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
+          return;
+        }
+        if (typeof params.item.text === 'string') {
+          completedTexts.push(params.item.text);
+        }
+      } else if (event.method === 'turn/completed') {
+        const turn = params.turn || {};
+        if (activeTurnId && turn.id && turn.id !== activeTurnId) {
+          return;
+        }
+        if (turn.status === 'failed') {
+          ctx._error = turn.error?.message || 'turn 执行失败';
+          done('error');
+          return;
+        }
+        done(turn.status === 'interrupted' ? 'interrupted' : 'completed');
+      }
+    }
+
+    bus.on('event', onEvent);
+    safety = setTimeout(() => done('timeout'), 10 * 60 * 1000);
+
+    startEphemeralTurn(ctx)
+      .then((turnId) => {
+        activeTurnId = turnId;
+        // 登记为 ephemeral turn：让 store 完全忽略这轮事件（不进全局事件环），turn/completed 时自动清理。
+        store.registerEphemeralTurn(turnId);
+        onTurnId?.(turnId);
+      })
+      .catch((error) => {
+        ctx._error = error.message;
+        done('error');
+      });
+  });
+}
+
+// 临时 thread 用完即弃：best-effort。ephemeral 本就不落 codex 历史，归档失败也无所谓。
+function discardThread(threadId) {
+  codex.request('thread/archive', { threadId }).catch(() => {});
+}
+
+// 扫描助手文本里落在工作目录内的产物文件（目前是图片），返回 { type, path, fileName, mimeType, byteSize, dataUrl? }。
+// 不绑 session：path 给本机直接读盘用；≤256KB 内联 dataUrl 方便远程客户端直接显示。
+async function collectArtifacts(text, ctx) {
+  const paths = extractWorkspaceImagePaths(text, ctx.cwd);
+  const artifacts = [];
+  for (const absPath of paths) {
+    const artifact = await buildArtifact(absPath);
+    if (artifact) {
+      artifacts.push(artifact);
+    }
+  }
+  return artifacts;
+}
+
+async function buildArtifact(absPath) {
+  let info;
+  try {
+    info = await stat(absPath);
+  } catch {
+    return null;
+  }
+  if (!info.isFile() || info.size === 0) {
+    return null;
+  }
+  const mimeType = contentType(absPath);
+  const artifact = {
+    type: 'image',
+    path: absPath,
+    fileName: path.basename(absPath),
+    mimeType,
+    byteSize: info.size,
+  };
+  if (info.size <= 256 * 1024) {
+    try {
+      const buffer = await readFile(absPath);
+      artifact.dataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
+    } catch {
+      // 内联失败不致命，path 仍可本地读取。
+    }
+  }
+  return artifact;
+}
+
+// 非流式：等 turn 完成，返回 { status, text, parsed?, artifacts }。
+async function awaitComplete(req, res, ctx) {
+  let turnId = null;
+  res.on('close', () => {
+    if (turnId && !res.writableEnded) {
+      codex.request('turn/interrupt', { threadId: ctx.threadId, turnId }).catch(() => {});
+    }
+  });
+
+  const result = await runEphemeralTurn(ctx, { onTurnId: (id) => { turnId = id; } });
+  discardThread(ctx.threadId);
+
+  if (result.status === 'error') {
+    sendError(res, Object.assign(new Error(ctx._error || 'complete 失败'), { statusCode: 502 }));
+    return;
+  }
+  if (result.status === 'timeout') {
+    sendError(res, Object.assign(new Error('complete 等待超时'), { statusCode: 504 }));
+    return;
+  }
+
+  const artifacts = await collectArtifacts(result.text, ctx);
+  const payload = { status: result.status, text: result.text, artifacts };
+  if (ctx.outputSchema) {
+    const parsed = tryParseJson(result.text);
+    payload.parsed = parsed.ok ? parsed.value : null;
+    if (!parsed.ok) {
+      payload.parseError = parsed.error;
+    }
+  }
+  sendJson(res, 200, payload);
+}
+
+// 流式：类型化 SSE（start / delta / artifact / done / error / ping）。
+async function streamComplete(req, res, ctx) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  const emit = (event, payload) => {
+    if (!res.writableEnded) {
+      writeTypedSse(res, event, payload);
+    }
+  };
+  emit('start', { threadId: ctx.threadId, cwd: ctx.cwd, appId: ctx.appId });
+
+  let seq = 0;
+  let turnId = null;
+  const heartbeat = setInterval(() => emit('ping', { t: new Date().toISOString() }), 15000);
+  res.on('close', () => {
+    if (turnId && !res.writableEnded) {
+      codex.request('turn/interrupt', { threadId: ctx.threadId, turnId }).catch(() => {});
+    }
+  });
+
+  const result = await runEphemeralTurn(ctx, {
+    onTurnId: (id) => { turnId = id; },
+    onDelta: (delta, tid) => emit('delta', { turnId: tid, delta, seq: seq++ }),
+  });
+  clearInterval(heartbeat);
+  discardThread(ctx.threadId);
+
+  if (result.status === 'error') {
+    emit('error', { code: 'turn_failed', message: ctx._error || 'complete 失败' });
+    res.end();
+    return;
+  }
+  if (result.status === 'timeout') {
+    emit('error', { code: 'stream_timeout', message: 'complete 等待超时' });
+    res.end();
+    return;
+  }
+
+  const artifacts = await collectArtifacts(result.text, ctx);
+  for (const artifact of artifacts) {
+    emit('artifact', artifact);
+  }
+  const donePayload = { status: result.status, finalText: result.text, artifacts };
+  if (ctx.outputSchema) {
+    const parsed = tryParseJson(result.text);
+    donePayload.parsed = parsed.ok ? parsed.value : null;
+    if (!parsed.ok) {
+      donePayload.parseError = parsed.error;
+    }
+  }
+  emit('done', donePayload);
+  res.end();
+}
+
 // 用请求自身的协议+host 拼绝对地址：经隧道进来是 https://bridge.example.com，本机是 http://127.0.0.1:4555。
 // 这样发给非局域网 App 的图片 url 可直接取用，不用客户端自己拼 base。
 function requestBaseUrl(req) {
@@ -1135,6 +1443,8 @@ function apiDocumentation() {
       'GET /api/threads/:id',
       'POST /api/threads/:id/resume',
       'POST /api/chat (SSE stream)',
+      'POST /api/complete',
+      'POST /api/complete?stream=1 (SSE stream)',
       'GET /api/sessions/:id',
       'POST /api/sessions/:id/resume',
       'GET /api/sessions/:id/events',
@@ -1226,7 +1536,12 @@ async function serveStatic(req, res, url) {
 }
 
 async function serveFile(res, target) {
-  const info = await stat(target);
+  let info = await stat(target);
+  // 目录请求（如 /m/）回退到该目录下的 index.html，避免裸目录 404。
+  if (info.isDirectory()) {
+    target = path.join(target, 'index.html');
+    info = await stat(target); // 缺失则抛出，交由 serveStatic 的兜底处理
+  }
   if (!info.isFile()) {
     sendText(res, 404, 'Not Found');
     return;
