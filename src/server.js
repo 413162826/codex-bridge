@@ -328,9 +328,14 @@ async function createSession(req, res) {
   }
   const app = body.appId ? apps.require(body.appId) : null;
   const request = normalizeSessionRequest(body, app);
-  // 允许在“已知项目根”里新建会话（用于「我的一天」待办的「立即去做」定位到对应工作区）。
-  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
-    request.cwd = body.cwd;
+  // cwd 放行规则：app key 只能指到“已知项目根”（防远端把任意路径当可写工作目录）；
+  // 本机/admin 额外允许任何真实存在的目录（如复盘日记目录，用于工作台「继续聊这一天」）。
+  if (body.cwd) {
+    if (await history.isProjectRoot(body.cwd)) {
+      request.cwd = body.cwd;
+    } else if (req.access?.scope === 'admin' && (await isExistingDirectory(body.cwd))) {
+      request.cwd = body.cwd;
+    }
   }
   const result = await codex.request('thread/start', {
     model: request.model,
@@ -939,6 +944,14 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
 // 临时 thread 用完即弃：best-effort。ephemeral 本就不落 codex 历史，归档失败也无所谓。
 function discardThread(threadId) {
   codex.request('thread/archive', { threadId }).catch(() => {});
+}
+
+async function isExistingDirectory(rawPath) {
+  try {
+    return (await stat(String(rawPath))).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // 扫描助手文本里落在工作目录内的产物文件（目前是图片），返回 { type, path, fileName, mimeType, byteSize, dataUrl? }。
