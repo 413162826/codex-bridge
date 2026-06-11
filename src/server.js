@@ -328,6 +328,10 @@ async function createSession(req, res) {
   }
   const app = body.appId ? apps.require(body.appId) : null;
   const request = normalizeSessionRequest(body, app);
+  // 允许在“已知项目根”里新建会话（用于「我的一天」待办的「立即去做」定位到对应工作区）。
+  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
+    request.cwd = body.cwd;
+  }
   const result = await codex.request('thread/start', {
     model: request.model,
     cwd: request.cwd,
@@ -852,13 +856,14 @@ async function startEphemeralTurn(ctx) {
 }
 
 // 跑一轮并累计助手文本：监听器必须在 turn/start 之前挂上，否则会漏掉开头的 delta（bus 是同步 EventEmitter）。
-// 不依赖 SessionStore；resolve { status, text, turnId }。
+// 不依赖 SessionStore；resolve { status, text, turnId, usage }。
 function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
   const { threadId } = ctx;
   return new Promise((resolve) => {
     let streamedText = '';
     const completedTexts = [];
     let activeTurnId = null;
+    let usage = null;
     let settled = false;
     let safety = null;
 
@@ -875,7 +880,7 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
       settled = true;
       bus.off('event', onEvent);
       clearTimeout(safety);
-      resolve({ status, text: finalText(), turnId: activeTurnId });
+      resolve({ status, text: finalText(), turnId: activeTurnId, usage });
     }
 
     function onEvent(event) {
@@ -897,6 +902,9 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
         if (typeof params.item.text === 'string') {
           completedTexts.push(params.item.text);
         }
+      } else if (event.method === 'thread/tokenUsage/updated') {
+        // 临时 thread 只跑这一轮，thread 累计用量即本次 complete 的用量。
+        usage = params.tokenUsage ?? params.usage ?? null;
       } else if (event.method === 'turn/completed') {
         const turn = params.turn || {};
         if (activeTurnId && turn.id && turn.id !== activeTurnId) {
@@ -998,7 +1006,7 @@ async function awaitComplete(req, res, ctx) {
   }
 
   const artifacts = await collectArtifacts(result.text, ctx);
-  const payload = { status: result.status, text: result.text, artifacts };
+  const payload = { status: result.status, text: result.text, artifacts, usage: result.usage ?? null };
   if (ctx.outputSchema) {
     const parsed = tryParseJson(result.text);
     payload.parsed = parsed.ok ? parsed.value : null;
@@ -1055,7 +1063,7 @@ async function streamComplete(req, res, ctx) {
   for (const artifact of artifacts) {
     emit('artifact', artifact);
   }
-  const donePayload = { status: result.status, finalText: result.text, artifacts };
+  const donePayload = { status: result.status, finalText: result.text, artifacts, usage: result.usage ?? null };
   if (ctx.outputSchema) {
     const parsed = tryParseJson(result.text);
     donePayload.parsed = parsed.ok ? parsed.value : null;
