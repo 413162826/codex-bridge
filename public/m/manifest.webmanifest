@@ -1,4 +1,5 @@
 {
+  "id": "/m/",
   "name": "Codex Chat",
   "short_name": "Codex",
   "description": "手机版 Codex Chat —— 直连本机 codex-bridge",
@@ -10,10 +11,34 @@
   "theme_color": "#f7f4ef",
   "icons": [
     {
+      "src": "/m/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/m/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/m/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/m/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
       "src": "/m/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
     }
   ]
 }

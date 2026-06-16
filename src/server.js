@@ -8,11 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
+import { createCodexSdkRuntime } from './codexSdkRuntime.js';
 import { createCodexHistory } from './codexHistory.js';
 import { toStrictJsonSchema, tryParseJson } from './complete.js';
 import { createRuntimeConfig, mergeConfig } from './config.js';
 import { createImageUpload, extractWorkspaceImagePaths, isPathInside, resolveUploadAppId } from './fileGateway.js';
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
+import { attachmentSummary, buildMobileCodexInput, materializeMobileAttachments, toAppServerInput } from './mobileAttachments.js';
+import { orderMobileProjects } from './mobileProjects.js';
 import { createOpenApiSpec } from './openapi.js';
 import { SessionStore, classifyConnectionNotice } from './sessionStore.js';
 import { loadBridgeState, saveBridgeState } from './stateStore.js';
@@ -29,6 +32,8 @@ mergeConfig(config, persistedState.config);
 const apps = new AppRegistry({ apps: persistedState.apps });
 const store = new SessionStore({ sessions: persistedState.sessions });
 const history = createCodexHistory();
+const mobileRuntime = createCodexSdkRuntime();
+const mobileWarmups = new Map();
 const bus = new EventEmitter();
 bus.setMaxListeners(200);
 
@@ -41,6 +46,14 @@ const server = http.createServer((req, res) => {
 
 server.listen(config.server.port, config.server.host, () => {
   console.log(`Codex Bridge listening on http://${config.server.host}:${config.server.port}`);
+  if (process.env.BRIDGE_CODEX_AUTOSTART !== '0') {
+    codex
+      .ensureStarted()
+      .then(() => prewarmStartupMobileDefault())
+      .catch((error) => {
+        publish({ type: 'codex.autostart.error', error: error.message, receivedAt: new Date().toISOString() });
+      });
+  }
 });
 
 function createClient() {
@@ -186,6 +199,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (route === 'GET /api/mobile/bootstrap') {
+    await mobileBootstrap(req, res);
+    return;
+  }
+
+  const mobileProjectSessionsMatch = url.pathname.match(/^\/api\/mobile\/projects\/([^/]+)\/sessions$/);
+  if (req.method === 'GET' && mobileProjectSessionsMatch) {
+    await mobileProjectSessions(req, res, decodeURIComponent(mobileProjectSessionsMatch[1]));
+    return;
+  }
+
+  const mobileSessionMatch = url.pathname.match(/^\/api\/mobile\/sessions\/([^/]+)$/);
+  if (req.method === 'GET' && mobileSessionMatch) {
+    await mobileSessionDetail(req, res, decodeURIComponent(mobileSessionMatch[1]));
+    return;
+  }
+
+  if (route === 'POST /api/mobile/chat') {
+    await mobileChatStream(req, res);
+    return;
+  }
+
   // ===== Codex 原生历史：项目 / 历史对话 / 进入续聊（只读扫描 ~/.codex/sessions） =====
   if (route === 'GET /api/projects') {
     sendJson(res, 200, { data: await history.listProjects() });
@@ -315,16 +350,400 @@ async function handleApi(req, res, url) {
   throw error;
 }
 
+const MOBILE_PROMPTS = [
+  { id: 'project-summary', text: '用 5 条要点总结当前项目结构，并指出我下一步最该看哪些文件。' },
+  { id: 'recent-risk', text: '查看这段会话上下文，帮我提炼目前最大的工程风险和下一步动作。' },
+  { id: 'image-output', text: '给当前项目设计一张手机端启动页视觉草图。', mode: 'image' },
+];
+
+async function mobileBootstrap(req, res) {
+  const projects = await history.listProjects();
+  const defaultSession = await resolveDefaultMobileSession(projects);
+  const mobileProjects = orderMobileProjects(projects, defaultSession);
+  sendJson(res, 200, {
+    ok: true,
+    prompts: MOBILE_PROMPTS,
+    projects: mobileProjects,
+    defaultSession,
+    bridge: {
+      cwd: config.codex.cwd,
+      model: config.codex.model,
+      appId: req.access?.appId ?? null,
+    },
+  });
+  warmDefaultMobileSession(defaultSession, req.access?.appId ?? null).catch((error) => {
+    publish({ type: 'bridge.mobile.prewarm.error', error: error.message, receivedAt: new Date().toISOString() });
+  });
+}
+
+async function mobileProjectSessions(req, res, projectId) {
+  void req;
+  const result = await history.listThreads(projectId);
+  sendJson(res, 200, {
+    project: result.project,
+    sessions: result.data.map((thread) => mobileThreadSummary(thread, result.project)),
+    truncated: result.truncated,
+  });
+}
+
+async function mobileSessionDetail(req, res, sessionId) {
+  void req;
+  const session = await getMobileSession(sessionId);
+  sendJson(res, 200, { session });
+}
+
+async function mobileChatStream(req, res) {
+  const body = await readJsonBody(req);
+  const text = String(body.text ?? body.prompt ?? '').trim();
+  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+  if (!text && attachments.length === 0) {
+    const error = new Error('请输入文字或上传附件');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const appId = body.appId || (req.access?.scope === 'app' ? req.access.appId : null);
+  const app = appId ? apps.get(appId) : null;
+  const target = await resolveMobileChatTarget(body, appId);
+  const uploadRoot = app?.workspaceRoot || path.join(projectRoot, 'data');
+  const files = await materializeMobileAttachments({ attachments, root: uploadRoot });
+  const input = toAppServerInput(
+    buildMobileCodexInput({
+      text,
+      files,
+      imageMode: body.mode === 'image' || body.output === 'image',
+    }),
+  );
+
+  await codex.ensureStarted();
+  const request = {
+    appId,
+    name: target.title || text.slice(0, 34) || config.ui.defaultSessionName,
+    cwd: target.cwd,
+    model: body.model ?? config.codex.model,
+    effort: body.effort ?? config.codex.effort,
+    speed: body.speed ?? config.codex.speed,
+    approvalPolicy: body.approvalPolicy ?? config.codex.approvalPolicy,
+    sandbox: body.sandbox ?? config.codex.sandbox,
+    serviceName: config.codex.serviceName,
+    ephemeral: false,
+    experimentalRawEvents: config.codex.experimentalRawEvents,
+    persistExtendedHistory: true,
+  };
+
+  let session;
+  if (target.threadId) {
+    const result = await codex.request('thread/resume', {
+      threadId: target.threadId,
+      cwd: target.cwd,
+      approvalPolicy: request.approvalPolicy,
+      sandbox: request.sandbox,
+      model: request.model,
+      persistExtendedHistory: true,
+      excludeTurns: false,
+    });
+    session = store.upsertResumedSession({ thread: result.thread, request, config });
+    session.cwd = target.cwd;
+    if (appId && !session.appId) session.appId = appId;
+  } else {
+    const result = await codex.request('thread/start', {
+      model: request.model,
+      cwd: request.cwd,
+      approvalPolicy: request.approvalPolicy,
+      sandbox: request.sandbox,
+      serviceName: request.serviceName,
+      ephemeral: request.ephemeral,
+      experimentalRawEvents: request.experimentalRawEvents,
+      persistExtendedHistory: request.persistExtendedHistory,
+    });
+    session = store.createSession({ thread: result.thread, request, config });
+  }
+
+  await persistState();
+  publish({
+    type: target.threadId ? 'bridge.session.resumed' : 'bridge.session.created',
+    session: summarySession(session),
+    receivedAt: new Date().toISOString(),
+  });
+  await streamTurn(req, res, session, { ...body, appId, input, model: request.model, effort: request.effort }, { created: !target.threadId });
+}
+
+async function resolveDefaultMobileSession(projects) {
+  const preferredProject = pickProjectForCwd(projects, config.codex.cwd);
+  const latestBridge = pickLatestBridgeSession(preferredProject);
+  const latestNative = preferredProject ? await latestNativeThread(preferredProject) : null;
+
+  if (latestBridge && (!latestNative || toTime(latestBridge.updatedAt) >= toTime(latestNative.startedAt))) {
+    return mobileBridgeSession(latestBridge);
+  }
+  if (latestNative) {
+    return mobileNativeSession(await history.getThread(latestNative.id));
+  }
+
+  const fallbackBridge = pickLatestBridgeSession(null);
+  if (fallbackBridge) {
+    return mobileBridgeSession(fallbackBridge);
+  }
+
+  const sortedProjects = [...projects]
+    .filter((project) => project.conversationCount > 0)
+    .sort((a, b) => toTime(b.lastActivity) - toTime(a.lastActivity));
+  for (const project of sortedProjects.slice(0, 8)) {
+    const thread = await latestNativeThread(project);
+    if (thread) {
+      return mobileNativeSession(await history.getThread(thread.id));
+    }
+  }
+  return null;
+}
+
+async function warmDefaultMobileSession(defaultSession, appId) {
+  if (!defaultSession?.id) {
+    return null;
+  }
+  const existing = mobileWarmups.get(defaultSession.id);
+  if (existing) {
+    return existing;
+  }
+  const warmup = prepareDefaultMobileSession(defaultSession, appId).catch((error) => {
+    mobileWarmups.delete(defaultSession.id);
+    throw error;
+  });
+  mobileWarmups.set(defaultSession.id, warmup);
+  return warmup;
+}
+
+async function prepareDefaultMobileSession(defaultSession, appId) {
+  await codex.ensureStarted();
+  let session = store.get(defaultSession.id);
+  let cwd = session?.cwd || defaultSession.cwd;
+  if (!session) {
+    const meta = await history.getThreadMeta(defaultSession.id);
+    cwd = meta?.cwd || cwd;
+  }
+  if (!cwd) {
+    return;
+  }
+  const result = await codex.request('thread/resume', {
+    threadId: defaultSession.id,
+    cwd,
+    approvalPolicy: config.codex.approvalPolicy,
+    sandbox: config.codex.sandbox,
+    model: config.codex.model,
+    persistExtendedHistory: true,
+    excludeTurns: false,
+  });
+  session = store.upsertResumedSession({
+    thread: result.thread,
+    request: {
+      cwd,
+      appId: appId || session?.appId || null,
+      name: defaultSession.title || defaultSession.projectName || defaultSession.id,
+    },
+    config,
+  });
+  session.cwd = cwd;
+  if (appId && !session.appId) session.appId = appId;
+  await persistState();
+  prewarmSession(session);
+  return session;
+}
+
+async function prewarmStartupMobileDefault() {
+  try {
+    const projects = await history.listProjects();
+    const defaultSession = await resolveDefaultMobileSession(projects);
+    await warmDefaultMobileSession(defaultSession, null);
+  } catch (error) {
+    publish({ type: 'bridge.mobile.startupPrewarm.error', error: error.message, receivedAt: new Date().toISOString() });
+  }
+}
+
+async function latestNativeThread(project) {
+  try {
+    const result = await history.listThreads(project.id);
+    const thread = result.data?.[0];
+    return thread ? { ...thread, project } : null;
+  } catch {
+    return null;
+  }
+}
+
+function pickLatestBridgeSession(project = null) {
+  const sessions = store
+    .list()
+    .filter((session) => session.status !== 'archived')
+    .filter((session) => !project || isPathUnder(session.cwd, project.path));
+  return sessions.find((session) => session.messages.length > 0) || sessions[0] || null;
+}
+
+async function getMobileSession(sessionId) {
+  const bridgeSession = store.get(sessionId);
+  if (bridgeSession) {
+    return mobileBridgeSession(bridgeSession);
+  }
+  return mobileNativeSession(await history.getThread(sessionId));
+}
+
+async function resolveMobileChatTarget(body, appId) {
+  const sessionId = String(body.sessionId || body.threadId || '').trim();
+  if (sessionId) {
+    const bridgeSession = store.get(sessionId);
+    if (bridgeSession) {
+      return {
+        threadId: bridgeSession.threadId,
+        session: bridgeSession,
+        cwd: bridgeSession.cwd,
+        title: bridgeSession.name,
+        created: false,
+        source: 'bridge',
+      };
+    }
+    const meta = await history.getThreadMeta(sessionId);
+    if (!meta) {
+      const error = new Error(`未知 session：${sessionId}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    const session = store.upsertResumedSession({
+      thread: { id: sessionId, sessionId },
+      request: {
+        cwd: meta.cwd,
+        appId,
+        name: meta.projectName || sessionId,
+      },
+      config,
+    });
+    session.cwd = meta.cwd;
+    session.appId ||= appId;
+    return {
+      threadId: sessionId,
+      session,
+      cwd: meta.cwd,
+      title: meta.projectName,
+      created: false,
+      source: 'codex-history',
+    };
+  }
+
+  const cwd = await resolveMobileCwd(body);
+  return {
+    threadId: null,
+    session: null,
+    cwd,
+    title: body.title || null,
+    created: true,
+    source: 'new',
+  };
+}
+
+async function resolveMobileCwd(body) {
+  if (body.projectId) {
+    const projects = await history.listProjects();
+    const project = projects.find((item) => item.id === body.projectId);
+    if (project?.path) return project.path;
+  }
+  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
+    return body.cwd;
+  }
+  return config.codex.cwd;
+}
+
+function mobileBridgeSession(session) {
+  return {
+    id: session.id,
+    threadId: session.threadId,
+    source: 'bridge',
+    title: session.name || projectNameFromPath(session.cwd) || session.id,
+    cwd: session.cwd,
+    projectName: projectNameFromPath(session.cwd),
+    updatedAt: session.updatedAt,
+    needsResume: true,
+    messages: (session.messages || [])
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .map((message) => ({
+        role: message.role,
+        text: message.text || '',
+        status: message.status || 'done',
+        at: message.updatedAt || message.createdAt || null,
+      })),
+  };
+}
+
+function mobileNativeSession(thread) {
+  return {
+    id: thread.id,
+    threadId: thread.id,
+    source: 'codex-history',
+    title: thread.title || thread.projectName || '对话',
+    cwd: thread.cwd,
+    projectId: thread.projectId,
+    projectName: thread.projectName,
+    needsResume: true,
+    messages: (thread.messages || []).map((message) => ({
+      role: message.role,
+      text: message.text || '',
+      status: 'done',
+      at: message.at || null,
+    })),
+  };
+}
+
+function mobileThreadSummary(thread, project) {
+  return {
+    id: thread.id,
+    threadId: thread.id,
+    title: thread.title || '(无标题对话)',
+    preview: thread.preview || '',
+    cwd: thread.cwd,
+    startedAt: thread.startedAt,
+    source: 'codex-history',
+    project: project ? { id: project.id, name: project.name, path: project.path } : null,
+  };
+}
+
+function pickProjectForCwd(projects, cwd) {
+  const cwdNorm = normPath(cwd);
+  let best = null;
+  let bestLen = -1;
+  for (const project of projects || []) {
+    const projectNorm = normPath(project.path);
+    if (!projectNorm) continue;
+    if (cwdNorm === projectNorm || cwdNorm.startsWith(`${projectNorm}\\`)) {
+      if (projectNorm.length > bestLen) {
+        best = project;
+        bestLen = projectNorm.length;
+      }
+    }
+  }
+  return best;
+}
+
+function isPathUnder(child, parent) {
+  const childNorm = normPath(child);
+  const parentNorm = normPath(parent);
+  return Boolean(childNorm && parentNorm && (childNorm === parentNorm || childNorm.startsWith(`${parentNorm}\\`)));
+}
+
+function normPath(value) {
+  return String(value || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+function projectNameFromPath(value) {
+  const parts = String(value || '').split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) || '';
+}
+
+function toTime(value) {
+  const time = Date.parse(value || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
 async function createSession(req, res) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
   if (req.access?.scope === 'app') {
-    if (body.appId && body.appId !== req.access.appId) {
-      const error = new Error('当前 appId 不能为其他 APP 创建 session');
-      error.statusCode = 403;
-      throw error;
-    }
-    body.appId = req.access.appId;
+    body.appId ||= req.access.appId;
   }
   const app = body.appId ? apps.require(body.appId) : null;
   const request = normalizeSessionRequest(body, app);
@@ -376,8 +795,7 @@ async function resumeNativeThread(req, res, threadId) {
     persistExtendedHistory: true,
     excludeTurns: false,
   });
-  // app scope 的 appId 最权威；本机管理员调用没有 scope，则用 body.appId 认领（让续聊归到调用方的 app）。
-  const claimedAppId = (req.access?.scope === 'app' ? req.access.appId : null) ?? body.appId ?? existing?.appId ?? null;
+  const claimedAppId = body.appId ?? (req.access?.scope === 'app' ? req.access.appId : null) ?? existing?.appId ?? null;
   const request = {
     cwd: meta.cwd,
     name: existing?.name || meta.projectName || threadId,
@@ -565,12 +983,7 @@ async function chatStream(req, res) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
   if (req.access?.scope === 'app') {
-    if (body.appId && body.appId !== req.access.appId) {
-      const error = new Error('当前 appId 不能为其他 APP 创建 session');
-      error.statusCode = 403;
-      throw error;
-    }
-    body.appId = req.access.appId;
+    body.appId ||= req.access.appId;
   }
   const app = body.appId ? apps.require(body.appId) : null;
   const request = normalizeSessionRequest(body, app);
@@ -603,7 +1016,7 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
   // 否则预热轮被打断时的 turn/completed 会被这条流误当成真实轮的完成。
   await settlePrewarm(session);
   const input = normalizeInput(body);
-  const appId = req.access?.scope === 'app' ? req.access.appId : session.appId || null;
+  const appId = session.appId || (req.access?.scope === 'app' ? req.access.appId : null);
   const baseUrl = requestBaseUrl(req);
 
   res.writeHead(200, {
@@ -783,14 +1196,9 @@ async function completeTask(req, res, url) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
 
-  // app 作用域：与 chatStream 同款，app key 只能为自己发起。
+  // appId 是远程访问钥匙，不再作为租户隔离边界；未指定 appId 时用当前钥匙认领。
   if (req.access?.scope === 'app') {
-    if (body.appId && body.appId !== req.access.appId) {
-      const error = new Error('当前 appId 不能为其他 APP 发起 complete');
-      error.statusCode = 403;
-      throw error;
-    }
-    body.appId = req.access.appId;
+    body.appId ||= req.access.appId;
   }
 
   const app = body.appId ? apps.require(body.appId) : null;
@@ -828,7 +1236,7 @@ async function completeTask(req, res, url) {
   const ctx = {
     threadId: started.thread.id,
     cwd: request.cwd,
-    appId: req.access?.scope === 'app' ? req.access.appId : body.appId || null,
+    appId: body.appId || (req.access?.scope === 'app' ? req.access.appId : null),
     baseUrl: requestBaseUrl(req),
     input,
     outputSchema: body.outputSchema,
@@ -1384,22 +1792,12 @@ function publicConfig() {
 }
 
 function visibleSessions(req) {
-  if (req.access?.scope !== 'app') {
-    return store.list();
-  }
-  return store.list().filter((session) => session.appId === req.access.appId);
+  return store.list();
 }
 
 function assertSessionAccess(req, session) {
-  if (req.access?.scope !== 'app') {
-    return;
-  }
-  if (session.appId === req.access.appId) {
-    return;
-  }
-  const error = new Error('当前 appId 无权访问该 session');
-  error.statusCode = 403;
-  throw error;
+  void req;
+  void session;
 }
 
 function summarySession(session) {
@@ -1459,6 +1857,10 @@ function apiDocumentation() {
       'POST /api/uploads/images',
       'GET /api/server-requests',
       'POST /api/server-requests/:id/respond',
+      'GET /api/mobile/bootstrap',
+      'GET /api/mobile/projects/:id/sessions',
+      'GET /api/mobile/sessions/:id',
+      'POST /api/mobile/chat (SSE stream)',
       'GET /api/sessions',
       'POST /api/sessions',
       'GET /api/projects',
@@ -1538,7 +1940,8 @@ function schedulePersist(delayMs = 750) {
 }
 
 async function serveStatic(req, res, url) {
-  const pathname = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+  const rootPath = shouldServeMobileRoot(req) ? '/m/index.html' : '/index.html';
+  const pathname = decodeURIComponent(url.pathname === '/' ? rootPath : url.pathname);
   const target = path.resolve(publicRoot, `.${pathname}`);
   if (!target.startsWith(publicRoot)) {
     sendText(res, 403, 'Forbidden');
@@ -1556,6 +1959,25 @@ async function serveStatic(req, res, url) {
     });
     res.end(body);
   }
+}
+
+function shouldServeMobileRoot(req) {
+  const host = hostName(req.headers['x-forwarded-host'] || req.headers.host);
+  return Boolean(host && !isLoopbackHost(host));
+}
+
+function hostName(value) {
+  const host = String(value || '').split(',')[0].trim().toLowerCase();
+  if (!host) return '';
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']');
+    return end >= 0 ? host.slice(1, end) : host;
+  }
+  return host.split(':')[0];
+}
+
+function isLoopbackHost(host) {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0';
 }
 
 async function serveFile(res, target) {

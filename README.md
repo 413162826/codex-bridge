@@ -213,10 +213,13 @@ curl -N -X POST http://127.0.0.1:4555/api/chat \
 ## 测试
 
 ```powershell
-npm test               # 单元测试（access-control / session-store / codex-history 等）
+npm test               # 必跑：单元测试 + 手机 Web baseline（默认会话、历史续聊、Bridge 地址规范化）
 npm run smoke          # 本机 smoke
 npm run smoke:android  # 手机端依赖的 Bridge API smoke（appId、图片上传、会话连续两轮等）
+npm run baseline       # 发布前基线：npm test + smoke:android（要求本机 bridge 服务已启动）
 ```
+
+发布前不要只跑零散用例；至少跑 `npm run baseline`。其中手机 Web baseline 会拦截这类“一打开默认会话就发消息”的退化：已保存 session 必须先 `/resume`，再 `/turns?stream=1`。
 
 ## 目录结构
 

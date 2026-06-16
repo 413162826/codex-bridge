@@ -213,7 +213,7 @@ test('a disabled appId is rejected even with an otherwise valid bearer token', (
   assert.equal(result.statusCode, 403);
 });
 
-test('app scoped key cannot create new appIds', () => {
+test('registered appId bearer token allows every API route', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'POST',
@@ -224,11 +224,12 @@ test('app scoped key cannot create new appIds', () => {
     apps: apps(['app-123']),
   });
 
-  assert.equal(result.allowed, false);
-  assert.equal(result.statusCode, 403);
+  assert.equal(result.allowed, true);
+  assert.equal(result.scope, 'app');
+  assert.equal(result.appId, 'app-123');
 });
 
-test('app scoped key cannot write global config', () => {
+test('registered appId bearer token can write global config by product design', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'PUT',
@@ -239,8 +240,9 @@ test('app scoped key cannot write global config', () => {
     apps: apps(['app-123']),
   });
 
-  assert.equal(result.allowed, false);
-  assert.equal(result.statusCode, 403);
+  assert.equal(result.allowed, true);
+  assert.equal(result.scope, 'app');
+  assert.equal(result.appId, 'app-123');
 });
 
 test('admin key allows all API routes', () => {

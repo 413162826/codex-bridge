@@ -74,11 +74,6 @@ export function evaluateApiAccess({ req, security, apps }) {
     return deny(403, '该 appId 已停用', clientIp, app.appId);
   }
 
-  const url = new URL(req.url, 'http://codex-bridge.local');
-  if (!isAppRouteAllowed(req.method, url.pathname, app.appId)) {
-    return deny(403, '当前 appId 无权访问该 API', clientIp, app.appId);
-  }
-
   return allow('app', { reason: 'app-key', clientIp, appId: app.appId });
 }
 
@@ -124,69 +119,6 @@ function extractAccessKey(req) {
 
 function getHeader(req, name) {
   return req.headers?.[name] || req.headers?.[name.toLowerCase()] || req.headers?.[name.toUpperCase()] || '';
-}
-
-function isAppRouteAllowed(method, pathname, appId) {
-  const route = `${method} ${pathname}`;
-  if (
-    route === 'GET /api/health' ||
-    route === 'GET /api/status' ||
-    route === 'GET /api/config' ||
-    route === 'GET /api/models' ||
-    route === 'GET /api/account' ||
-    route === 'GET /api/rate-limits' ||
-    route === 'GET /api/openapi.json'
-  ) {
-    return true;
-  }
-
-  if (route === 'POST /api/codex/start' || route === 'POST /api/codex/restart') {
-    return true;
-  }
-
-  if (route === 'POST /api/uploads/images') {
-    return true;
-  }
-
-  if (route === 'POST /api/chat') {
-    return true;
-  }
-
-  if (route === `GET /api/apps/${appId}`) {
-    return true;
-  }
-
-  if (route === 'GET /api/sessions' || route === 'POST /api/sessions') {
-    return true;
-  }
-
-  // Codex 原生历史：项目列表 / 项目内对话 / 单条对话详情 / 进入续聊。
-  if (route === 'GET /api/projects') {
-    return true;
-  }
-  if (method === 'GET' && /^\/api\/projects\/[^/]+\/threads$/.test(pathname)) {
-    return true;
-  }
-  if (method === 'GET' && /^\/api\/threads\/[^/]+$/.test(pathname)) {
-    return true;
-  }
-  if (method === 'POST' && /^\/api\/threads\/[^/]+\/resume$/.test(pathname)) {
-    return true;
-  }
-
-  const sessionRoute = pathname.match(/^\/api\/sessions\/[^/]+(?:\/([^/]+))?$/);
-  if (!sessionRoute) {
-    return false;
-  }
-
-  const action = sessionRoute[1] || '';
-  if (method === 'GET' && (!action || action === 'events' || action === 'files')) {
-    return true;
-  }
-  if (method === 'POST' && ['resume', 'turns', 'interrupt', 'steer', 'archive'].includes(action)) {
-    return true;
-  }
-  return false;
 }
 
 function isDirectLoopback(req, clientIp) {

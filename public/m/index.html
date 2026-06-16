@@ -11,6 +11,8 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Codex Chat" />
     <link rel="manifest" href="/m/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/m/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/m/icon-192.png" />
     <link rel="stylesheet" href="/m/styles.css" />
     <title>Codex Chat</title>
   </head>
@@ -52,12 +54,17 @@
           </button>
         </div>
         <div class="composer-actions">
+          <button class="mode-btn icon-action" id="attachBtn" type="button" aria-label="添加图片或文件">
+            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M21 12.5l-8.7 8.7a6 6 0 01-8.5-8.5l9.4-9.4a4 4 0 015.7 5.7L9.6 18.3a2 2 0 01-2.8-2.8l8.5-8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <input id="fileInput" type="file" multiple hidden />
           <button class="mode-btn" id="imageBtn" type="button" aria-pressed="false">
             <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 5h16v14H4z M4 16l4-4 3 3 4-5 5 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-            图片生成
+            回图片
           </button>
           <span class="composer-hint" id="hint"></span>
         </div>
+        <div class="attachment-list" id="attachList"></div>
       </form>
     </div>
 
@@ -96,6 +103,14 @@
 
     <div class="toast" id="toast" hidden></div>
 
-    <script src="/m/app.js" type="module"></script>
+    <script src="/m/app.js?v=5" type="module"></script>
+    <script>
+      // 注册 Service Worker：让 PWA 可被「安装」，并实现弱网/离线秒开。
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>

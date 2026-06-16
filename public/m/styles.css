@@ -1,12 +1,14 @@
 :root {
-  --paper: #f7f4ef;
+  --paper: #f6f3eb;
   --panel: #ffffff;
   --ink: #1b1a17;
   --muted: #8a837a;
+  --moss: #44624a;
+  --coral: #d46a4c;
   --line: rgba(20, 18, 15, 0.08);
   --bubble-user: #111111;
   --bubble-assistant: #ffffff;
-  --accent: #2f6df0;
+  --accent: #245fc7;
   --danger: #c0392b;
   --radius: 18px;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -51,7 +53,7 @@ button {
   grid-template-columns: 44px 1fr 44px;
   align-items: center;
   padding: calc(var(--safe-top) + 8px) 10px 8px;
-  background: rgba(247, 244, 239, 0.92);
+  background: rgba(246, 243, 235, 0.92);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--line);
   position: relative;
@@ -110,7 +112,7 @@ button {
   place-items: center;
   font-size: 28px;
   color: #fff;
-  background: linear-gradient(150deg, #b7d8ff, #f3b2c4 55%, #f6d59f);
+  background: linear-gradient(150deg, var(--moss), #446f85 55%, var(--coral));
 }
 
 .welcome h1 {
@@ -207,6 +209,32 @@ button {
   background: #f0ece6;
 }
 
+.bubble-files {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.bubble-files:empty {
+  display: none;
+}
+
+.bubble-files span {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--moss);
+  background: rgba(68, 98, 74, 0.1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bubble-error {
   align-self: center;
   color: var(--danger);
@@ -220,7 +248,7 @@ button {
 .composer {
   flex: 0 0 auto;
   padding: 8px 12px calc(var(--safe-bottom) + 8px);
-  background: rgba(247, 244, 239, 0.96);
+  background: rgba(246, 243, 235, 0.96);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--line);
 }
@@ -284,15 +312,48 @@ button {
   font-weight: 600;
 }
 
+.icon-action {
+  width: 32px;
+  height: 32px;
+  justify-content: center;
+  padding: 0;
+}
+
 .mode-btn[aria-pressed="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--moss);
+  border-color: var(--moss);
   color: #fff;
 }
 
 .composer-hint {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 12px;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 4px 0;
+}
+
+.attachment-chip {
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--moss) 22%, transparent);
+  background: color-mix(in srgb, var(--moss) 8%, white);
+  color: var(--moss);
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- 抽屉 ---------- */
