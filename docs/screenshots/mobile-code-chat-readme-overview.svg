@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">手机端 Code Chat App：原理、性能与效果</title>
+  <desc id="desc">一张面向 GitHub README 的概览图，解释手机浏览器如何通过 Codex Bridge 使用本机 Codex 项目和历史会话。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .ink { fill: #111827; font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .muted { fill: #5b6472; font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif; }
+      .small { font-size: 18px; }
+      .tiny { font-size: 15px; }
+      .title { font-size: 44px; font-weight: 800; letter-spacing: 0; }
+      .subtitle { font-size: 22px; fill: #4b5563; }
+      .section { font-size: 25px; font-weight: 800; }
+      .cardTitle { font-size: 23px; font-weight: 800; }
+      .body { font-size: 18px; }
+      .pillText { font-size: 16px; font-weight: 700; }
+      .card { fill: #ffffff; stroke: #d8e0ea; stroke-width: 2; }
+      .soft { fill: #eef6ff; stroke: #9ec9ff; stroke-width: 2; }
+      .green { fill: #edf9f1; stroke: #83cf9a; stroke-width: 2; }
+      .purple { fill: #f4efff; stroke: #b89cff; stroke-width: 2; }
+      .orange { fill: #fff6e7; stroke: #f2bd6b; stroke-width: 2; }
+      .blueFill { fill: #1769e0; }
+      .greenFill { fill: #1f9d55; }
+      .purpleFill { fill: #7c3aed; }
+      .orangeFill { fill: #d97706; }
+      .lineBlue { stroke: #1769e0; stroke-width: 5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+      .lineGreen { stroke: #1f9d55; stroke-width: 5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+      .linePurple { stroke: #7c3aed; stroke-width: 5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+      .shadow { filter: drop-shadow(0 12px 24px rgba(15, 23, 42, 0.10)); }
+    </style>
+    <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#1769e0"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#1f9d55"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1280" height="760"/>
+  <circle cx="1080" cy="80" r="170" fill="#e8f2ff"/>
+  <circle cx="180" cy="710" r="210" fill="#edf9f1"/>
+
+  <text x="56" y="70" class="ink title">手机端 Code Chat App</text>
+  <text x="56" y="108" class="subtitle">把电脑里的 Codex 项目、历史会话和多模态能力，变成手机浏览器里可直接使用的 Chat App。</text>
+
+  <g transform="translate(54 138)" class="shadow">
+    <rect class="card" width="1172" height="372" rx="24"/>
+    <text x="30" y="48" class="ink section">一看就懂的工作原理</text>
+    <text x="30" y="82" class="muted body">手机只负责聊天体验；真正的项目、历史和模型执行都留在你的电脑上。</text>
+
+    <g transform="translate(30 118)">
+      <rect class="soft" width="204" height="190" rx="18"/>
+      <rect x="64" y="28" width="76" height="118" rx="18" fill="#ffffff" stroke="#1769e0" stroke-width="4"/>
+      <rect x="79" y="44" width="46" height="7" rx="4" fill="#b7d7ff"/>
+      <rect x="82" y="72" width="40" height="32" rx="9" fill="#1769e0" opacity=".18"/>
+      <rect x="74" y="112" width="56" height="16" rx="8" fill="#1769e0"/>
+      <text x="102" y="170" text-anchor="middle" class="ink cardTitle">手机浏览器</text>
+      <text x="102" y="196" text-anchor="middle" class="muted tiny">打开 /m/，填 appId</text>
+    </g>
+
+    <path class="lineBlue" d="M252 230 C300 230 318 230 360 230" marker-end="url(#arrowBlue)"/>
+
+    <g transform="translate(364 118)">
+      <rect class="green" width="236" height="190" rx="18"/>
+      <text x="118" y="48" text-anchor="middle" class="ink cardTitle">Codex Bridge</text>
+      <text x="118" y="78" text-anchor="middle" class="muted body">本机 Node 服务 :4555</text>
+      <text x="28" y="118" class="ink small">• 鉴权：有效 appId</text>
+      <text x="28" y="148" class="ink small">• 读取项目和历史</text>
+      <text x="28" y="178" class="ink small">• 管理附件和流式返回</text>
+    </g>
+
+    <path class="lineGreen" d="M616 230 C655 206 680 190 720 182" marker-end="url(#arrowGreen)"/>
+    <path class="lineGreen" d="M616 230 C655 254 680 270 720 278" marker-end="url(#arrowGreen)"/>
+
+    <g transform="translate(724 118)">
+      <rect class="orange" width="210" height="92" rx="16"/>
+      <text x="105" y="38" text-anchor="middle" class="ink cardTitle">本机历史</text>
+      <text x="105" y="66" text-anchor="middle" class="muted small">~/.codex/sessions</text>
+      <text x="105" y="91" text-anchor="middle" class="muted tiny">项目列表 · 最近会话</text>
+    </g>
+
+    <g transform="translate(724 244)">
+      <rect class="purple" width="210" height="92" rx="16"/>
+      <text x="105" y="38" text-anchor="middle" class="ink cardTitle">Codex 执行</text>
+      <text x="105" y="66" text-anchor="middle" class="muted small">resume / start</text>
+      <text x="105" y="91" text-anchor="middle" class="muted tiny">模型生成文本和图片</text>
+    </g>
+
+    <path class="linePurple" d="M946 290 C1000 290 1016 246 1062 236" marker-end="url(#arrowPurple)"/>
+    <path class="linePurple" d="M1062 236 C1034 188 988 184 946 184" marker-end="url(#arrowPurple)" stroke-dasharray="9 10"/>
+
+    <g transform="translate(962 118)">
+      <rect class="soft" width="178" height="190" rx="18"/>
+      <text x="89" y="42" text-anchor="middle" class="ink cardTitle">流式体验</text>
+      <text x="28" y="82" class="ink small">• 首屏加载最近会话</text>
+      <text x="28" y="112" class="ink small">• 逐字返回，不傻等</text>
+      <text x="28" y="142" class="ink small">• 图片 / 文件可发送</text>
+      <text x="28" y="172" class="ink small">• 可继续历史对话</text>
+    </g>
+
+    <g transform="translate(30 324)">
+      <rect x="0" y="0" width="1112" height="28" rx="14" fill="#eef2f7"/>
+      <text x="24" y="20" class="muted tiny">真实链路：手机浏览器 → GET /api/mobile/bootstrap → 选择最近 session → POST /api/mobile/chat(JSON) → Codex 流式返回 SSE</text>
+    </g>
+  </g>
+
+  <g transform="translate(54 540)" class="shadow">
+    <rect class="card" width="370" height="150" rx="22"/>
+    <rect x="24" y="24" width="48" height="48" rx="14" class="blueFill"/>
+    <text x="48" y="57" text-anchor="middle" fill="#fff" font-size="26" font-weight="800" font-family="Segoe UI, Microsoft YaHei, Arial">1</text>
+    <text x="92" y="52" class="ink cardTitle">效果</text>
+    <text x="92" y="84" class="muted body">手机上直接看项目、找历史、继续聊</text>
+    <text x="92" y="114" class="muted body">支持文字、图片、文件和模型回图</text>
+  </g>
+
+  <g transform="translate(454 540)" class="shadow">
+    <rect class="card" width="370" height="150" rx="22"/>
+    <rect x="24" y="24" width="48" height="48" rx="14" class="greenFill"/>
+    <text x="48" y="57" text-anchor="middle" fill="#fff" font-size="26" font-weight="800" font-family="Segoe UI, Microsoft YaHei, Arial">2</text>
+    <text x="92" y="52" class="ink cardTitle">性能</text>
+    <text x="92" y="84" class="muted body">默认会话启动预热，首句更快返回</text>
+    <text x="92" y="114" class="muted body">首页默认 session 首包实测约 3.2s</text>
+  </g>
+
+  <g transform="translate(854 540)" class="shadow">
+    <rect class="card" width="370" height="150" rx="22"/>
+    <rect x="24" y="24" width="48" height="48" rx="14" class="purpleFill"/>
+    <text x="48" y="57" text-anchor="middle" fill="#fff" font-size="26" font-weight="800" font-family="Segoe UI, Microsoft YaHei, Arial">3</text>
+    <text x="92" y="52" class="ink cardTitle">发布护栏</text>
+    <text x="92" y="84" class="muted body">npm test：55/55 pass</text>
+    <text x="92" y="114" class="muted body">smoke:android 覆盖 appId / 上传 / 续聊</text>
+  </g>
+
+  <g transform="translate(54 710)">
+    <rect width="1172" height="34" rx="17" fill="#ffffff" stroke="#d8e0ea"/>
+    <text x="28" y="23" class="muted tiny">复现：npm start → 打开 http://127.0.0.1:4555/m/?appId=你的APPID → 发送“只回复 BRIDGE-MOBILE-OK” → 左上角查看项目与历史会话。</text>
+  </g>
+</svg>

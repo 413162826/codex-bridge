@@ -5,13 +5,17 @@
 
 默认监听 `http://127.0.0.1:4555`。
 
+## 一图看懂
+
+![手机端 Code Chat App 原理、性能与效果](docs/screenshots/mobile-code-chat-readme-overview.svg)
+
 ## ✨ 功能特性
 
 - **本地 API 网关**：把 `codex app-server` 封装成稳定的 HTTP/SSE 接口，第三方应用调 HTTP 即可，不必直接对接 app-server。
 - **可观测控制台** `/`：实时查看会话、事件流、token 用量、审批请求。
-- **手机端 Codex Chat** `/m/`：流式对话、图片生成、连接波动提示，PWA 可加到主屏当 App 用。
+- **手机端 Codex Chat** `/m/`：流式对话、图片/文件输入、模型回图、连接波动提示，PWA 可加到主屏当 App 用。
 - **📱 项目 / 历史浏览（新）**：读本机 `~/.codex` 的原生历史，按「项目 → 历史对话」两级列出你用过的全部 Codex 对话，点进任意一条**在该项目真实目录里接着聊**。
-- **多 App 隔离 + appId 鉴权**：每个 `appId` 有独立工作区，只能访问自己的会话；本机回环直接放行管理端。
+- **appId 鉴权**：远程请求只要带有效 `appId` 就能调用 Bridge API；本机回环直接放行管理端。
 - **公网接入**：内置 Cloudflare Tunnel 一键脚本，配合 appId 密钥对外开放。
 
 ## 界面预览
@@ -53,7 +57,7 @@ npm start
 
 ```text
 控制台    http://127.0.0.1:4555/
-手机端    http://127.0.0.1:4555/m/index.html
+手机端    http://127.0.0.1:4555/m/
 Swagger   http://127.0.0.1:4555/docs   (openapi: /api/openapi.json)
 ```
 
@@ -61,7 +65,7 @@ Android 原生壳与构建脚本在 `android/`（`android/scripts/build-apk.ps1`
 
 ## 📱 手机端 Codex Chat
 
-打开 `http://127.0.0.1:4555/m/index.html`（iOS Safari / Android Chrome 可「添加到主屏幕」当 PWA）。
+打开 `http://127.0.0.1:4555/m/`（iOS Safari / Android Chrome 可「添加到主屏幕」当 PWA）。
 
 - **接入设置**（抽屉底部 ⚙）：
   - *Bridge 地址*：本机直连留空即可；走公网域名时填 `https://你的域名`。
@@ -114,7 +118,7 @@ npm start
 
 - 本机 `127.0.0.1` 始终作为管理端放行，方便在电脑上创建/管理 `appId`。
 - 外部请求用已注册 `appId` 作访问密钥：`Authorization: Bearer <appId>` 或 `X-Codex-App-Id: <appId>`。
-- `appId` 密钥只能访问自己的 session、读项目/历史、续聊；不能远程创建新 appId 或管理其他 app。
+- `appId` 是远程访问钥匙，不是租户隔离边界；持有有效 `appId` 的客户端可以调用 Bridge API、读取项目/历史并在真实目录续聊。
 - 管理级白名单可用 `CODEX_BRIDGE_ALLOWED_IPS` 或 `CODEX_BRIDGE_ADMIN_KEYS`：
 
   ```powershell
