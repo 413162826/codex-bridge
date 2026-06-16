@@ -7,7 +7,7 @@
 
 ## 一图看懂
 
-![手机端 Code Chat App 原理、性能与效果](docs/screenshots/mobile-code-chat-readme-overview.svg)
+![把电脑上的 Codex 对话带到手机上](docs/screenshots/mobile-code-chat-readme-overview.png)
 
 ## ✨ 功能特性
 
