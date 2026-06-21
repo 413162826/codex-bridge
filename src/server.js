@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
+import { createHiddenCodexDirectiveStreamFilter, stripHiddenCodexDirectives } from './codexDirectives.js';
 import { createCodexSdkRuntime } from './codexSdkRuntime.js';
 import { createCodexHistory } from './codexHistory.js';
 import { toStrictJsonSchema, tryParseJson } from './complete.js';
@@ -663,7 +664,7 @@ function mobileBridgeSession(session) {
       .filter((message) => message.role === 'user' || message.role === 'assistant')
       .map((message) => ({
         role: message.role,
-        text: message.text || '',
+        text: stripHiddenCodexDirectives(message.text || '').text,
         status: message.status || 'done',
         at: message.updatedAt || message.createdAt || null,
       })),
@@ -682,7 +683,7 @@ function mobileNativeSession(thread) {
     needsResume: true,
     messages: (thread.messages || []).map((message) => ({
       role: message.role,
-      text: message.text || '',
+      text: stripHiddenCodexDirectives(message.text || '').text,
       status: 'done',
       at: message.at || null,
     })),
@@ -1040,6 +1041,7 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
   let seq = 0;
   let heartbeat = null;
   let safety = null;
+  const directiveFilter = createHiddenCodexDirectiveStreamFilter();
   const emittedImages = new Set();
   const imageScans = [];
 
@@ -1070,6 +1072,11 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
   function finishStream(turn) {
     if (finished) {
       return;
+    }
+    const tail = directiveFilter.flush();
+    if (tail) {
+      assistantText += tail;
+      writeTypedSse(res, 'delta', { turnId: turn?.id ?? activeTurnId, delta: tail, seq: seq++ });
     }
     finished = true;
     cleanup();
@@ -1103,11 +1110,14 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
       if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
         return;
       }
-      const delta = params.delta ?? '';
+      const delta = directiveFilter.push(params.delta ?? '');
+      if (!delta) {
+        return;
+      }
       assistantText += delta;
       writeTypedSse(res, 'delta', { turnId: params.turnId ?? activeTurnId, delta, seq: seq++ });
     } else if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
-      scanImages(params.item.text || '', params.turnId ?? activeTurnId);
+      scanImages(stripHiddenCodexDirectives(params.item.text || '').text, params.turnId ?? activeTurnId);
     } else if (event.method === 'thread/tokenUsage/updated') {
       writeTypedSse(res, 'usage', { turnId: params.turnId ?? activeTurnId, tokenUsage: params.tokenUsage ?? params.usage ?? null });
     } else if (event.method === 'error' || event.method === 'warning') {
@@ -1279,6 +1289,7 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
     let usage = null;
     let settled = false;
     let safety = null;
+    const directiveFilter = createHiddenCodexDirectiveStreamFilter();
 
     // 最终文本优先用 item/completed 的权威全文（结构化输出常常一次性给完、无逐字 delta）；
     // 没有 completed 文本时才退回累计的 delta。
@@ -1289,6 +1300,11 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
     function done(status) {
       if (settled) {
         return;
+      }
+      const tail = directiveFilter.flush();
+      if (tail) {
+        streamedText += tail;
+        onDelta?.(tail, activeTurnId);
       }
       settled = true;
       bus.off('event', onEvent);
@@ -1305,7 +1321,10 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
         if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
           return;
         }
-        const delta = params.delta ?? '';
+        const delta = directiveFilter.push(params.delta ?? '');
+        if (!delta) {
+          return;
+        }
         streamedText += delta;
         onDelta?.(delta, params.turnId ?? activeTurnId);
       } else if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
@@ -1313,7 +1332,7 @@ function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
           return;
         }
         if (typeof params.item.text === 'string') {
-          completedTexts.push(params.item.text);
+          completedTexts.push(stripHiddenCodexDirectives(params.item.text).text);
         }
       } else if (event.method === 'thread/tokenUsage/updated') {
         // 临时 thread 只跑这一轮，thread 累计用量即本次 complete 的用量。

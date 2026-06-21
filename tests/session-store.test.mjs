@@ -54,6 +54,23 @@ test('SessionStore serializes and restores sessions for bridge restarts', () => 
   assert.equal(restoredSession.activeTurnId, null);
 });
 
+test('SessionStore hides Codex inbox directives from assistant messages', () => {
+  const store = new SessionStore();
+  const session = store.createSession({
+    thread: { id: 'thread-directive', sessionId: 'codex-directive' },
+    request: { appId: 'app-1' },
+    config,
+  });
+  store.beginTurn(session, { turn: { id: 'turn-directive', status: 'running' }, input: null });
+  store.appendAssistantDelta({
+    threadId: 'thread-directive',
+    turnId: 'turn-directive',
+    delta: '你好，请说要处理什么。\n\n::inbox-item{title="等待用户任务" summary="用户仅打招呼，尚未提供具体需求"}',
+  });
+
+  assert.equal(store.require('thread-directive').messages[0].text, '你好，请说要处理什么。');
+});
+
 test('SessionStore restores interrupted sessions as ready for future resume attempts', () => {
   const restored = new SessionStore({
     sessions: [

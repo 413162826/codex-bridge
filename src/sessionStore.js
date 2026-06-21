@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { stripHiddenCodexDirectives } from './codexDirectives.js';
+
 export class SessionStore {
   constructor({ sessions = [], maxEventsPerSession = 500 } = {}) {
     this.sessions = new Map();
@@ -155,7 +157,7 @@ export class SessionStore {
       return;
     }
     const now = new Date().toISOString();
-    message.text += delta ?? '';
+    message.text = stripHiddenCodexDirectives(`${message.text}${delta ?? ''}`).text;
     message.updatedAt = now;
     session.updatedAt = now;
   }
@@ -340,7 +342,7 @@ function normalizePersistedMessage(message) {
     id: message.id || randomUUID(),
     role: message.role || 'assistant',
     turnId: message.turnId ?? null,
-    text: message.text || '',
+    text: stripHiddenCodexDirectives(message.text || '').text,
     status: message.status,
     input: message.input ?? null,
     createdAt: message.createdAt || new Date().toISOString(),
