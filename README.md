@@ -15,7 +15,7 @@
 - **可观测控制台** `/`：实时查看会话、事件流、token 用量、审批请求。
 - **手机端 Codex Chat** `/m/`：流式对话、图片/文件输入、模型回图、连接波动提示，PWA 可加到主屏当 App 用。
 - **📱 项目 / 历史浏览（新）**：读本机 `~/.codex` 的原生历史，按「项目 → 历史对话」两级列出你用过的全部 Codex 对话，点进任意一条**在该项目真实目录里接着聊**。
-- **appId 鉴权**：远程请求只要带有效 `appId` 就能调用 Bridge API；本机回环直接放行管理端。
+- **appId 鉴权**：远程请求带有效 `appId` 才能访问移动端、上传和单次任务 API；本机回环直接放行管理端。
 - **公网接入**：内置 Cloudflare Tunnel 一键脚本，配合 appId 密钥对外开放。
 
 ## 界面预览
@@ -61,8 +61,6 @@ npm start
 Swagger   http://127.0.0.1:4555/docs   (openapi: /api/openapi.json)
 ```
 
-Android 原生壳与构建脚本在 `android/`（`android/scripts/build-apk.ps1`），APK 也可从 `http://127.0.0.1:4555/codex-bridge.apk` 取。
-
 ## 📱 手机端 Codex Chat
 
 打开 `http://127.0.0.1:4555/m/`（iOS Safari / Android Chrome 可「添加到主屏幕」当 PWA）。
@@ -71,7 +69,7 @@ Android 原生壳与构建脚本在 `android/`（`android/scripts/build-apk.ps1`
   - *Bridge 地址*：本机直连留空即可；走公网域名时填 `https://你的域名`。
   - *App ID*：手机经公网进来**必须**填一个已注册的 `appId`；本机 `127.0.0.1` 直连可留空。
 - **项目 / 历史浏览**：点左上角菜单 → 看到**项目列表** → 点项目 → 该项目下的**历史对话** → 点任意一条载入记录，发消息即在该项目真实目录里继续。
-- **在此项目新建对话**：项目内点「＋ 在此项目新建对话」，新会话直接落在该项目目录。
+- **在此项目新建对话**：项目内点「＋ 在此项目新建对话」，新会话复用该项目最近桌面会话的 `cwd/sandbox/permissionProfile` 执行画像；解析不到时会提示先在 Windows Codex App 打开该项目。
 - **图片生成**：输入描述后点「图片生成」，生成的图片直接在对话里内联返回。
 
 ### 历史数据从哪来
@@ -118,7 +116,7 @@ npm start
 
 - 本机 `127.0.0.1` 始终作为管理端放行，方便在电脑上创建/管理 `appId`。
 - 外部请求用已注册 `appId` 作访问密钥：`Authorization: Bearer <appId>` 或 `X-Codex-App-Id: <appId>`。
-- `appId` 是远程访问钥匙，不是租户隔离边界；持有有效 `appId` 的客户端可以调用 Bridge API、读取项目/历史并在真实目录续聊。
+- `appId` 是远程访问钥匙，不是租户隔离边界；持有有效 `appId` 的客户端可以读取移动端项目/历史并在真实目录续聊，但不能改全局配置、账号、app 注册表或响应 app-server server request。
 - 管理级白名单可用 `CODEX_BRIDGE_ALLOWED_IPS` 或 `CODEX_BRIDGE_ADMIN_KEYS`：
 
   ```powershell
@@ -141,6 +139,10 @@ npm start
 .\scripts\setup-cloudflare-tunnel.ps1 -Hostname bridge.example.com -InstallService
 ```
 
+脚本会在 `config.yml` 写入 `edge-ip-version: "4"`，让 cloudflared 固定连 Cloudflare IPv4 edge，降低 Windows 代理 / TUN / IPv6 auto 路径带来的抖动。
+
+watchdog 不只看首页：默认同时探测 `https://<域名>/m/index.html` 和 `https://<域名>/api/mobile/bootstrap`。移动 API 返回 `401/403` 也算可用，因为这说明请求已经穿过 Cloudflare Tunnel 到达 Bridge 鉴权层；如果公网探针失败但本地 `127.0.0.1:4555` 仍健康，watchdog 会重启 `cloudflared`。
+
 只有局域网内手机要直连时，才把 `server.host` 改成 `0.0.0.0`。
 
 ## API 参考
@@ -148,14 +150,22 @@ npm start
 ```text
 GET  /api/health
 GET  /api/status
-GET  /api/config            PUT /api/config
+GET  /api/config            PUT /api/config          # admin-only
 GET  /api/openapi.json
-POST /api/codex/start       POST /api/codex/restart
-GET  /api/events
-GET  /api/models            GET /api/account            GET /api/rate-limits
-GET  /api/apps              POST /api/apps
-GET  /api/apps/:id          PUT /api/apps/:id           DELETE /api/apps/:id
+POST /api/codex/start       POST /api/codex/restart  # admin-only
+GET  /api/events                                        # admin-only
+GET  /api/models            GET /api/account            GET /api/rate-limits  # admin-only
+GET  /api/apps              POST /api/apps              # admin-only
+GET  /api/apps/:id          PUT /api/apps/:id           DELETE /api/apps/:id  # admin-only
 POST /api/uploads/images
+
+# 手机端 / appId 可用
+GET  /api/mobile/bootstrap
+GET  /api/mobile/events             # appId 可用；只推送 bridge.mobile.unread 通知事件
+GET  /api/mobile/projects/:id/sessions
+GET  /api/mobile/sessions/:id
+POST /api/mobile/chat                 # 多轮对话，走 app-server thread/resume + turn/start
+POST /api/complete                    # 单次任务，走 @openai/codex-sdk
 
 # 会话
 GET  /api/sessions          POST /api/sessions
@@ -172,7 +182,7 @@ GET  /api/projects/:id/threads          # 某项目的历史对话
 GET  /api/threads/:id                   # 单条对话的完整文字记录
 POST /api/threads/:id/resume            # 用 rollout id 恢复该对话、登记进会话以便续聊
 
-# 高级流式（推荐第三方接入）
+# 高级流式（管理端 / 内部接入）
 POST /api/chat                          # 建会话 + 发首轮 + 流式返回，一个请求搞定
 ```
 
@@ -183,14 +193,15 @@ Invoke-RestMethod http://127.0.0.1:4555/api/apps -Method Post `
   -ContentType "application/json" -Body '{"name":"my-app"}'
 ```
 
-会生成 `appId(UUID)`、创建 `workspaces/<appId>` 目录、复制当前全局默认配置作为该 app 初始配置。
+会生成 `appId(UUID)`、创建 `workspaces/<appId>` 目录。`appId` 只作为远程钥匙，不再作为会话租户边界。
 
 ### 高级流式接口
 
 为第三方提供「一次调用即流式输出」，响应是 `text/event-stream`，用 POST 承载（隧道下实时、且能带鉴权头）。
 
-- `POST /api/chat` —— 建会话 + 发第一轮 + 流式返回。
-- `POST /api/sessions/:id/turns?stream=1` —— 已有会话发后续轮，只流式返回这一轮。
+- `POST /api/mobile/chat` —— 手机/外部多轮对话；Bridge 从桌面历史解析执行画像，缺失就返回 409，不落到全局默认 cwd/sandbox。
+- `POST /api/complete` —— 单次任务；底层走 `@openai/codex-sdk`，适合做完即弃的小任务。
+- `POST /api/chat` / `POST /api/sessions/:id/turns?stream=1` —— 管理端和内部控制台使用的 app-server 高级接口。
 
 事件按 `event:` 名区分：
 
@@ -207,20 +218,20 @@ event: ping     {t}                                          15s 心跳
 例（本机免鉴权；走域名时加 `-H "Authorization: Bearer <appId>"`）：
 
 ```bash
-curl -N -X POST http://127.0.0.1:4555/api/chat \
+curl -N -X POST http://127.0.0.1:4555/api/mobile/chat \
   -H "content-type: application/json" \
-  -d '{"text":"用一句话解释快速排序"}'
+  -d '{"projectId":"<从 /api/mobile/bootstrap 取到的项目 id>","text":"用一句话解释快速排序"}'
 ```
 
-多轮：用首帧返回的 `sessionId`，对 `POST /api/sessions/<id>/turns?stream=1` 继续发即可。客户端断开会自动打断该轮（省 token）。
+多轮：用首帧返回的 `sessionId`，继续调用 `POST /api/mobile/chat` 并传同一个 `sessionId`。客户端断开会自动打断该轮（省 token）。
 
 ## 测试
 
 ```powershell
 npm test               # 必跑：单元测试 + 手机 Web baseline（默认会话、历史续聊、Bridge 地址规范化）
 npm run smoke          # 本机 smoke
-npm run smoke:android  # 手机端依赖的 Bridge API smoke（appId、图片上传、会话连续两轮等）
-npm run baseline       # 发布前基线：npm test + smoke:android（要求本机 bridge 服务已启动）
+npm run smoke:mobile   # 手机端依赖的 Bridge API smoke（appId、图片上传、会话连续两轮等）
+npm run baseline       # 发布前基线：npm test + smoke:mobile（要求本机 bridge 服务已启动）
 ```
 
 发布前不要只跑零散用例；至少跑 `npm run baseline`。其中手机 Web baseline 会拦截这类“一打开默认会话就发消息”的退化：已保存 session 必须先 `/resume`，再 `/turns?stream=1`。
@@ -236,7 +247,6 @@ src/                后端：HTTP/SSE 服务、鉴权、会话、原生历史读
 public/             控制台与手机端
   index.html        本地 API 控制台
   m/                手机端 Codex Chat（PWA）
-android/            Android 原生壳与构建脚本
 scripts/            smoke / 探针 / Cloudflare 隧道安装
 docs/screenshots/   README 截图
 ```

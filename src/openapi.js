@@ -10,9 +10,9 @@ export function createOpenApiSpec(config) {
         '把本机 `codex app-server` 包装成一个更容易接入的本地 HTTP/SSE API。',
         '',
         '几个关键约定：',
-        '- `cwd` 表示新 session 或 turn 默认在哪个项目目录下工作。',
-        '- `appId` 表示调用方应用身份；如果传了 `appId`，session 默认会绑定到该 app 的 `workspaceRoot`。',
-        '- `model / effort / sandbox / approvalPolicy / ephemeral` 是最核心的策略参数。',
+        '- `appId` 是远程访问钥匙，不是租户隔离边界；app scope 只开放移动端、上传和单次任务等外部能力。',
+        '- 手机多轮会话不接受外部传入 `cwd/sandbox/approvalPolicy`，而是从桌面 Codex 历史里的执行画像恢复。',
+        '- 管理端（本机 / admin key）仍可使用 `cwd/model/effort/sandbox/approvalPolicy` 等策略参数。',
         '- `speed` 目前主要是 bridge 侧的策略标签，方便 UI 和上层调用方表达偏好，当前不会直接映射到底层 app-server 官方参数。',
         '- `GET /api/events` 与 `GET /api/sessions/{sessionId}/events` 返回的是 SSE，不是普通 JSON。',
       ].join('\n'),
@@ -26,7 +26,7 @@ export function createOpenApiSpec(config) {
     tags: [
       { name: 'Bridge', description: 'Bridge 自身状态、配置和健康检查' },
       { name: 'Codex Runtime', description: '控制本机 codex app-server 子进程' },
-      { name: 'Apps', description: '管理 appId、默认配置和专属工作目录' },
+      { name: 'Apps', description: '管理 appId 和默认配置（admin-only）' },
       { name: 'Sessions', description: '创建、查看、恢复和归档 session' },
       { name: 'Turns', description: '发起对话、等待结果、打断和 steer' },
       { name: 'Streaming', description: 'SSE 事件流' },
@@ -107,6 +107,26 @@ export function createOpenApiSpec(config) {
                   schema: {
                     type: 'string',
                     example: 'event: message\\ndata: {"type":"bridge.sse.connected"}\\n\\n',
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/api/mobile/events': {
+        get: {
+          tags: ['Mobile'],
+          summary: '订阅移动端通知 SSE',
+          description: '返回 `text/event-stream`。appId 可访问，只下发 `bridge.mobile.unread` 等移动端通知事件，不暴露全局 admin 事件流。',
+          responses: {
+            '200': {
+              description: 'SSE stream',
+              content: {
+                'text/event-stream': {
+                  schema: {
+                    type: 'string',
+                    example: 'event: message\\ndata: {"type":"bridge.mobile.unread","sessionId":"019e..."}\\n\\n',
                   },
                 },
               },
@@ -282,9 +302,10 @@ export function createOpenApiSpec(config) {
           tags: ['High-level'],
           summary: '无状态一次性补全（不建 session）',
           description: [
-            '一次性 AI 任务的统一入口：建临时 `ephemeral` thread → 跑一轮 → 返回结果 → 丢弃 thread。',
+            '一次性 AI 任务的统一入口：底层使用 `@openai/codex-sdk` 跑一轮，不进入 app-server 的 thread/turn 生命周期。',
             '',
-            '与 `/api/chat` 的区别：**这条调用不进 `/api/sessions`、不写 `bridge-state.json`、不留 codex 历史**。',
+            '与 `/api/mobile/chat` 的区别：**这条调用不做多轮会话管理，不写 `bridge-state.json`**。',
+            'app scope 调用必须传 `sessionId/threadId` 或 `projectId`，由 Bridge 从桌面历史解析执行画像；解析不到会返回 409。',
             '适合“生成一张图 / 写个文档 / 抽取或生成 JSON”这类做完即弃、结果才是产物的小功能。',
             '',
             '- 传 `outputSchema`（JSON Schema）时下发结构化输出，返回里附带兜底解析后的 `parsed`。',
@@ -298,7 +319,10 @@ export function createOpenApiSpec(config) {
                 schema: {
                   type: 'object',
                   properties: {
-                    appId: { type: 'string', description: '调用方应用身份；决定工作目录与作用域。' },
+                    appId: { type: 'string', description: '调用方应用身份；app scope 调用以鉴权头为准。' },
+                    sessionId: { type: 'string', description: '可选；复用某条桌面历史会话的执行画像。' },
+                    threadId: { type: 'string', description: '同 `sessionId`。' },
+                    projectId: { type: 'string', description: '可选；复用项目最近一条桌面会话的执行画像。' },
                     text: { type: 'string', description: '快捷输入；与 `prompt` / `input` 三选一。' },
                     prompt: { type: 'string', description: '同 `text`。' },
                     input: {
@@ -310,16 +334,15 @@ export function createOpenApiSpec(config) {
                       type: 'object',
                       description: '可选 JSON Schema；下发后模型按结构化输出，返回里附 `parsed`。',
                     },
-                    model: { type: 'string' },
-                    effort: { type: 'string', enum: ['low', 'medium', 'high'] },
-                    cwd: { type: 'string', description: '可选；仅接受历史里出现过的项目根。' },
+                    model: { type: 'string', description: 'admin 调用可覆盖；app scope 优先使用执行画像。' },
+                    effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh'] },
+                    cwd: { type: 'string', description: 'admin-only；app scope 不接受 cwd 兜底。' },
                     stream: { type: 'boolean', description: 'true 改走 SSE 流式。' },
                   },
                 },
                 example: {
                   text: '把这段话压缩成不超过 20 字的标题：……',
-                  appId: '0322f41b-561e-43d0-b561-96ed72110918',
-                  effort: 'low',
+                  projectId: 'a1b2c3d4e5f6',
                 },
               },
             },
@@ -350,7 +373,7 @@ export function createOpenApiSpec(config) {
                   schema: {
                     type: 'string',
                     example:
-                      'event: start\\ndata: {"threadId":"019e..."}\\n\\nevent: delta\\ndata: {"delta":"...","seq":0}\\n\\nevent: done\\ndata: {"status":"completed","finalText":"..."}\\n\\n',
+                      'event: start\\ndata: {"runtime":"codex-sdk"}\\n\\nevent: delta\\ndata: {"delta":"...","seq":0}\\n\\nevent: done\\ndata: {"status":"completed","finalText":"..."}\\n\\n',
                   },
                 },
               },

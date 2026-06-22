@@ -20,6 +20,7 @@ export class SessionStore {
   createSession({ thread, request, config }) {
     const now = new Date().toISOString();
     const threadId = thread.id;
+    const executionProfile = normalizeExecutionProfile(request.executionProfile);
     const session = {
       id: threadId,
       threadId,
@@ -29,12 +30,16 @@ export class SessionStore {
       status: 'ready',
       createdAt: now,
       updatedAt: now,
-      cwd: request.cwd || config.codex.cwd,
-      model: request.model ?? config.codex.model,
-      effort: request.effort ?? config.codex.effort,
+      cwd: executionProfile?.cwd || request.cwd || config.codex.cwd,
+      model: executionProfile?.model ?? request.model ?? config.codex.model,
+      effort: executionProfile?.effort ?? request.effort ?? config.codex.effort,
       speed: request.speed ?? config.codex.speed,
-      approvalPolicy: request.approvalPolicy ?? config.codex.approvalPolicy,
-      sandbox: request.sandbox ?? config.codex.sandbox,
+      approvalPolicy: executionProfile?.approvalPolicy ?? request.approvalPolicy ?? config.codex.approvalPolicy,
+      sandbox: sandboxModeFromPolicy(executionProfile?.sandboxPolicy) || request.sandbox || config.codex.sandbox,
+      sandboxPolicy: executionProfile?.sandboxPolicy ?? null,
+      permissionProfile: executionProfile?.permissionProfile ?? null,
+      workspaceRoots: executionProfile?.workspaceRoots ?? [],
+      executionProfile,
       ephemeral: request.ephemeral ?? config.codex.ephemeral,
       thread,
       messages: [],
@@ -51,6 +56,7 @@ export class SessionStore {
   upsertResumedSession({ thread, request, config }) {
     const existing = this.sessions.get(thread.id);
     if (existing) {
+      applyExecutionProfile(existing, request.executionProfile);
       existing.thread = thread;
       existing.status = 'ready';
       existing.updatedAt = new Date().toISOString();
@@ -94,6 +100,10 @@ export class SessionStore {
       speed: session.speed,
       approvalPolicy: session.approvalPolicy,
       sandbox: session.sandbox,
+      sandboxPolicy: session.sandboxPolicy,
+      permissionProfile: session.permissionProfile,
+      workspaceRoots: session.workspaceRoots,
+      executionProfile: session.executionProfile,
       ephemeral: session.ephemeral,
       thread: session.thread,
       messages: session.messages,
@@ -313,6 +323,10 @@ function normalizePersistedSession(session) {
     speed: session.speed || 'balanced',
     approvalPolicy: session.approvalPolicy || 'never',
     sandbox: session.sandbox || 'workspace-write',
+    sandboxPolicy: session.sandboxPolicy ?? session.executionProfile?.sandboxPolicy ?? null,
+    permissionProfile: session.permissionProfile ?? session.executionProfile?.permissionProfile ?? null,
+    workspaceRoots: Array.isArray(session.workspaceRoots) ? session.workspaceRoots : session.executionProfile?.workspaceRoots ?? [],
+    executionProfile: normalizeExecutionProfile(session.executionProfile),
     ephemeral: Boolean(session.ephemeral),
     thread: session.thread || { id },
     messages: Array.isArray(session.messages) ? session.messages.map(normalizePersistedMessage) : [],
@@ -360,6 +374,49 @@ function normalizePersistedTurn(turn) {
     assistantMessageId: turn.assistantMessageId,
     turn: turn.turn,
   };
+}
+
+function normalizeExecutionProfile(profile) {
+  if (!profile || typeof profile !== 'object') {
+    return null;
+  }
+  return {
+    ...profile,
+    cwd: profile.cwd || null,
+    workspaceRoots: Array.isArray(profile.workspaceRoots) ? profile.workspaceRoots : [],
+    approvalPolicy: profile.approvalPolicy || null,
+    sandboxPolicy: profile.sandboxPolicy || null,
+    permissionProfile: profile.permissionProfile || null,
+  };
+}
+
+function applyExecutionProfile(session, profile) {
+  const normalized = normalizeExecutionProfile(profile);
+  if (!normalized) {
+    return;
+  }
+  session.executionProfile = normalized;
+  session.cwd = normalized.cwd || session.cwd;
+  session.model = normalized.model ?? session.model;
+  session.effort = normalized.effort ?? session.effort;
+  session.approvalPolicy = normalized.approvalPolicy ?? session.approvalPolicy;
+  session.sandboxPolicy = normalized.sandboxPolicy ?? session.sandboxPolicy ?? null;
+  session.permissionProfile = normalized.permissionProfile ?? session.permissionProfile ?? null;
+  session.workspaceRoots = normalized.workspaceRoots ?? session.workspaceRoots ?? [];
+  session.sandbox = sandboxModeFromPolicy(normalized.sandboxPolicy) || session.sandbox;
+}
+
+function sandboxModeFromPolicy(policy) {
+  switch (policy?.type) {
+    case 'dangerFullAccess':
+      return 'danger-full-access';
+    case 'workspaceWrite':
+      return 'workspace-write';
+    case 'readOnly':
+      return 'read-only';
+    default:
+      return '';
+  }
 }
 
 // 把 codex 的 error/warning 通知归类成“连接层提示”，便于让调用方区分

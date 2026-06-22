@@ -61,6 +61,7 @@ if (-not (Test-Path $credPath)) { Fail "找不到隧道凭证文件 $credPath" }
 $config = @"
 tunnel: $tunnelId
 credentials-file: $credPath
+edge-ip-version: "4"
 ingress:
   - hostname: $Hostname
     service: http://localhost:$LocalPort
@@ -68,7 +69,8 @@ ingress:
       connectTimeout: 30s
   - service: http_status:404
 "@
-Set-Content -Path $configPath -Value $config -Encoding UTF8
+$encoding = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($configPath, $config, $encoding)
 Ok "已写入 $configPath  ($Hostname -> http://localhost:$LocalPort)"
 
 # 绑定 DNS 路由（需要 zone 已激活）
@@ -85,9 +87,16 @@ try {
 if ($InstallService) {
   $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
   if (-not $isAdmin) { Fail "-InstallService 需要管理员权限，请在“以管理员身份运行”的 PowerShell 里重跑。" }
-  $sysDir = Join-Path $env:WINDIR 'System32\config\systemprofile\.cloudflared'
+  $windowsDir = $env:WINDIR
+  if (-not $windowsDir) { $windowsDir = $env:SystemRoot }
+  if (-not $windowsDir) { $windowsDir = 'C:\Windows' }
+  $sysDir = Join-Path $windowsDir 'System32\config\systemprofile\.cloudflared'
   New-Item -ItemType Directory -Force -Path $sysDir | Out-Null
-  Copy-Item $certPath, $credPath, $configPath -Destination $sysDir -Force
+  $sysCredPath = Join-Path $sysDir "$tunnelId.json"
+  $sysConfigPath = Join-Path $sysDir 'config.yml'
+  Copy-Item $certPath, $credPath -Destination $sysDir -Force
+  $sysConfig = $config.Replace($credPath, $sysCredPath)
+  [System.IO.File]::WriteAllText($sysConfigPath, $sysConfig, $encoding)
   cloudflared service install | Out-Host
   Start-Service cloudflared -ErrorAction SilentlyContinue
   Ok "已安装并启动 cloudflared 服务（开机自启）。配置副本：$sysDir"

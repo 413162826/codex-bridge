@@ -63,10 +63,11 @@ test('mobile baseline: project history opens a session and continues via mobile 
     projectButton.dispatch('click');
     await waitFor(() => h.calls.some((call) => call.path === '/api/mobile/projects/project-1/sessions'));
     await waitFor(() => h.elements.drawerList.children.length > 1);
+    assert.equal(h.textContent().includes('最近'), true);
 
     const firstSessionButton = h.elements.drawerList.children[1];
     firstSessionButton.dispatch('click');
-    await waitFor(() => h.calls.some((call) => call.path === '/api/mobile/sessions/thread-1'));
+    await waitFor(() => h.calls.some((call) => call.path === '/api/mobile/sessions/thread-1?source=codex-history'));
     await waitFor(() => h.elements.title.textContent === '历史会话');
 
     h.elements.input.value = '接着说';
@@ -146,7 +147,7 @@ function installMobileHarness({ search = '', storedConfig = null } = {}) {
           { id: 'p2', text: '找风险' },
           { id: 'p3', text: '画一张图', mode: 'image' },
         ],
-        projects: [{ id: 'project-1', name: '手机codex', path: 'D:\\repo', conversationCount: 1, lastActivity: '2026-06-15T00:00:00.000Z' }],
+        projects: [{ id: 'project-1', name: '手机codex', path: 'D:\\repo', conversationCount: 1, lastActivity: '2026-06-15T00:10:00.000Z' }],
         defaultSession: {
           id: 'session-1',
           threadId: 'session-1',
@@ -159,16 +160,25 @@ function installMobileHarness({ search = '', storedConfig = null } = {}) {
     if (method === 'GET' && url.pathname === '/api/mobile/projects/project-1/sessions') {
       return jsonResponse({
         project: { id: 'project-1', name: '手机codex', path: 'D:\\repo' },
-        sessions: [{ id: 'thread-1', title: '历史会话', startedAt: '2026-06-15T00:00:00.000Z', source: 'codex-history' }],
+        sessions: [{
+          id: 'thread-1',
+          title: '历史会话',
+          preview: '继续完善手机端体验',
+          startedAt: '2026-06-15T00:00:00.000Z',
+          updatedAt: '2026-06-15T00:10:00.000Z',
+          source: 'codex-history',
+        }],
       });
     }
-    if (method === 'GET' && url.pathname === '/api/mobile/sessions/thread-1') {
+    if (method === 'GET' && url.pathname === '/api/mobile/sessions/thread-1' && url.searchParams.get('source') === 'codex-history') {
       return jsonResponse({
         session: {
           id: 'thread-1',
           threadId: 'thread-1',
           title: '历史会话',
           cwd: 'D:\\repo',
+          startedAt: '2026-06-15T00:00:00.000Z',
+          updatedAt: '2026-06-15T00:10:00.000Z',
           messages: [{ role: 'assistant', text: '历史消息', status: 'done' }],
         },
       });
@@ -211,7 +221,10 @@ function createElements() {
     'input',
     'composer',
     'sendBtn',
+    'moreBtn',
+    'composerPanel',
     'imageBtn',
+    'attachImageBtn',
     'attachBtn',
     'fileInput',
     'attachList',
@@ -226,6 +239,8 @@ function createElements() {
     'drawerTitle',
     'drawerNew',
     'drawerList',
+    'pushBtn',
+    'pushLabel',
     'settingsBtn',
     'settingsDialog',
     'baseUrlInput',
@@ -341,6 +356,10 @@ class FakeClassList {
     else if (this.names.has(name)) this.names.delete(name);
     else this.names.add(name);
     this.sync();
+  }
+
+  contains(name) {
+    return this.names.has(name);
   }
 
   sync() {

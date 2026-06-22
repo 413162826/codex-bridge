@@ -9,8 +9,8 @@
 //       · 首行 session_meta：{ payload: { id, cwd, timestamp } }
 //       · 正文 event_msg：user_message / agent_message 即用户与助手的可见消息
 
-import { createReadStream, readFileSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { createReadStream, existsSync, readFileSync } from 'node:fs';
+import { open, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,12 +20,25 @@ const INDEX_TTL_MS = 4000;
 const MAX_THREADS_PER_PROJECT = 200;
 const MAX_TRANSCRIPT_MESSAGES = 300;
 const MAX_MESSAGE_CHARS = 8000;
+const TAIL_SCAN_BYTES = 1024 * 1024;
 const PREWARM_MARKER = '系统预热';
+const MAX_PROFILE_SCAN_LINES = 5000;
 // 有界并发：一次性并发打开成百上千个文件流会耗尽文件描述符（EMFILE）。
 const SCAN_CONCURRENCY = 24;
 
 export function resolveCodexHome() {
-  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  if (process.env.CODEX_HOME) return process.env.CODEX_HOME;
+  const primary = path.join(os.homedir(), '.codex');
+  if (hasCodexState(primary)) return primary;
+  if (process.platform === 'win32') {
+    const adminHome = path.join(process.env.SystemDrive || 'C:', 'Users', 'Administrator', '.codex');
+    if (hasCodexState(adminHome)) return adminHome;
+  }
+  return primary;
+}
+
+function hasCodexState(root) {
+  return existsSync(path.join(root, 'sessions')) || existsSync(path.join(root, '.codex-global-state.json'));
 }
 
 export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
@@ -106,6 +119,38 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
     });
   }
 
+  // 读文件尾部的时间戳，作为“最近对话时间”。比全量扫描每个 rollout 轻很多，
+  // 也比只看 session_meta 的开始时间更符合手机端“热度/最近”排序。
+  async function readTailTimestamp(file) {
+    let handle;
+    try {
+      handle = await open(file, 'r');
+      const stat = await handle.stat();
+      const length = Math.min(stat.size, 96 * 1024);
+      if (!length) return null;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, stat.size - length);
+      const text = buffer.toString('utf8');
+      const lines = text.split(/\r?\n/).reverse();
+      for (const line of lines.slice(0, 160)) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+          const o = JSON.parse(trimmed);
+          const ts = o.timestamp || o.payload?.timestamp || null;
+          if (ts) return ts;
+        } catch {
+          // 尾部可能截到半行，继续向前找完整 JSON 行。
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+
   // 取该对话第一条“真实用户消息”，作为列表标题/预览（跳过预热轮的系统消息）。
   function readFirstUserMessage(file) {
     return new Promise((resolve) => {
@@ -173,12 +218,61 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
     });
   }
 
+  // 从文件尾部反向找最近一条可见消息，只把 final_answer 当成“回答结束”。
+  // commentary/status 只是电脑端工作过程提示，不能触发手机提醒。
+  async function readLatestFinalAnswer(file) {
+    let handle;
+    try {
+      handle = await open(file, 'r');
+      const stat = await handle.stat();
+      const length = Math.min(stat.size, TAIL_SCAN_BYTES);
+      if (!length) return null;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, stat.size - length);
+      const text = buffer.toString('utf8');
+      const lines = text.split(/\r?\n/).reverse();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        let o;
+        try {
+          o = JSON.parse(trimmed);
+        } catch {
+          // 尾部可能截断了超长 JSON 行，继续向前找完整行。
+          continue;
+        }
+        if (o.type !== 'event_msg') continue;
+        const payload = o.payload || {};
+        if (payload.type === 'user_message') {
+          return null;
+        }
+        if (payload.type !== 'agent_message') continue;
+        if (payload.phase !== 'final_answer') {
+          return null;
+        }
+        const message = String(payload.message ?? payload.text ?? '').trim();
+        if (!message) return null;
+        return {
+          at: o.timestamp || payload.timestamp || null,
+          text: stripLongText(message),
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+
   async function buildIndex() {
     const { roots, hints } = readGlobalState();
     const files = await walkRollouts(sessionsDir);
     const headers = await mapLimit(files, SCAN_CONCURRENCY, async (file) => {
       const header = await readHeader(file);
-      return header && header.cwd ? { ...header, file } : null;
+      if (!header?.cwd) return null;
+      const updatedAt = (await readTailTimestamp(file)) || header.startedAt;
+      return { ...header, updatedAt, file };
     });
 
     const registry = new Map(); // normPath -> project
@@ -214,19 +308,25 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
       const rootPath = pickRoot(header, roots, hintMap) || header.cwd;
       const project = ensureProject(rootPath);
       if (!project) continue;
-      project.threads.push({ id: header.id, cwd: header.cwd, file: header.file, startedAt: header.startedAt });
+      project.threads.push({
+        id: header.id,
+        cwd: header.cwd,
+        file: header.file,
+        startedAt: header.startedAt,
+        updatedAt: header.updatedAt || header.startedAt,
+      });
       project.conversationCount += 1;
-      if (header.startedAt && (!project.lastActivity || header.startedAt > project.lastActivity)) {
-        project.lastActivity = header.startedAt;
+      if (header.updatedAt && (!project.lastActivity || header.updatedAt > project.lastActivity)) {
+        project.lastActivity = header.updatedAt;
       }
     }
 
     const threadsById = new Map();
     for (const project of registry.values()) {
-      project.threads.sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+      project.threads.sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')));
       for (const thread of project.threads) {
         const prev = threadsById.get(thread.id);
-        if (!prev || String(thread.startedAt || '') > String(prev.startedAt || '')) {
+        if (!prev || String(thread.updatedAt || thread.startedAt || '') > String(prev.updatedAt || prev.startedAt || '')) {
           threadsById.set(thread.id, { ...thread, projectId: project.id, projectName: project.name });
         }
       }
@@ -287,6 +387,7 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
         title: preview || '(无标题对话)',
         preview,
         startedAt: thread.startedAt,
+        updatedAt: thread.updatedAt || thread.startedAt,
         cwd: thread.cwd,
       };
     });
@@ -305,13 +406,15 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
       error.statusCode = 404;
       throw error;
     }
-    const messages = await readTranscript(entry.file);
+    const [messages, firstUserMessage] = await Promise.all([readTranscript(entry.file), readFirstUserMessage(entry.file)]);
     return {
       id: threadId,
       cwd: entry.cwd,
       projectId: entry.projectId,
       projectName: entry.projectName,
-      title: messages.find((m) => m.role === 'user')?.text?.slice(0, 60) || '对话',
+      startedAt: entry.startedAt,
+      updatedAt: entry.updatedAt || entry.startedAt,
+      title: firstUserMessage || messages.find((m) => m.role === 'user')?.text?.slice(0, 60) || '对话',
       messages,
     };
   }
@@ -320,7 +423,70 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
     const idx = await ensureIndex();
     const entry = idx.threadsById.get(threadId);
     if (!entry) return null;
-    return { cwd: entry.cwd, projectId: entry.projectId, projectName: entry.projectName };
+    return { cwd: entry.cwd, projectId: entry.projectId, projectName: entry.projectName, rolloutPath: entry.file };
+  }
+
+  async function getThreadExecutionProfile(threadId) {
+    const idx = await ensureIndex();
+    const entry = idx.threadsById.get(threadId);
+    if (!entry) return null;
+    const profile = await readExecutionProfile(entry.file, {
+      threadId,
+      cwd: entry.cwd,
+      projectId: entry.projectId,
+      projectName: entry.projectName,
+    });
+    return profile && isCompleteExecutionProfile(profile) ? profile : null;
+  }
+
+  async function getProjectExecutionProfile(projectId) {
+    const idx = await ensureIndex();
+    const project = idx.projectById.get(projectId);
+    if (!project) {
+      const error = new Error(`未知 project：${projectId}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    for (const thread of project.threads) {
+      const profile = await getThreadExecutionProfile(thread.id);
+      if (profile) {
+        return {
+          ...profile,
+          projectId: project.id,
+          projectName: project.name,
+          projectPath: project.path,
+          inheritedFromThreadId: thread.id,
+        };
+      }
+    }
+    return null;
+  }
+
+  async function listRecentFinalAnswers({ limit = 24 } = {}) {
+    const idx = await ensureIndex();
+    const recent = [...idx.threadsById.entries()]
+      .map(([id, thread]) => ({ id, ...thread }))
+      .sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')))
+      .slice(0, Math.max(1, limit));
+    const data = await mapLimit(recent, Math.min(SCAN_CONCURRENCY, 8), async (thread) => {
+      const latest = await readLatestFinalAnswer(thread.file);
+      if (!latest) return null;
+      const title = await readFirstUserMessage(thread.file);
+      return {
+        id: thread.id,
+        threadId: thread.id,
+        cwd: thread.cwd,
+        file: thread.file,
+        projectId: thread.projectId,
+        projectName: thread.projectName,
+        startedAt: thread.startedAt,
+        updatedAt: latest.at || thread.updatedAt || thread.startedAt,
+        assistantAt: latest.at || thread.updatedAt || thread.startedAt,
+        assistantText: latest.text,
+        title: title || thread.projectName || 'Codex 回复完成',
+      };
+    });
+    return data.filter(Boolean);
   }
 
   async function isProjectRoot(rawPath) {
@@ -339,10 +505,120 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
     listThreads,
     getThread,
     getThreadMeta,
+    getThreadExecutionProfile,
+    getProjectExecutionProfile,
+    listRecentFinalAnswers,
     isProjectRoot,
     invalidate,
     codexHome,
   };
+}
+
+function readExecutionProfile(file, fallback = {}) {
+  return new Promise((resolve) => {
+    const stream = createReadStream(file, { encoding: 'utf8' });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    let scanned = 0;
+    let latest = null;
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      stream.destroy();
+      resolve(latest ? normalizeExecutionProfile(latest, { ...fallback, rolloutPath: file }) : null);
+    };
+
+    rl.on('line', (line) => {
+      if (++scanned > MAX_PROFILE_SCAN_LINES) {
+        finish();
+        return;
+      }
+      try {
+        const o = JSON.parse(line);
+        if (o.type === 'turn_context' && o.payload) {
+          latest = o.payload;
+        }
+      } catch {
+        // 跳过坏行或被截断的行。
+      }
+    });
+    rl.on('close', finish);
+    stream.on('error', finish);
+  });
+}
+
+function normalizeExecutionProfile(payload = {}, fallback = {}) {
+  const sandboxPolicy = normalizeSandboxPolicy(payload.sandbox_policy || payload.sandboxPolicy);
+  const permissionProfile = normalizePermissionProfile(payload.permission_profile || payload.permissionProfile);
+  const approvalPolicy = normalizeApprovalPolicy(payload.approval_policy || payload.approvalPolicy);
+  return {
+    source: 'codex-rollout',
+    threadId: fallback.threadId || null,
+    cwd: payload.cwd || fallback.cwd || null,
+    workspaceRoots: Array.isArray(payload.workspace_roots) ? payload.workspace_roots : [],
+    approvalPolicy,
+    sandboxPolicy,
+    permissionProfile,
+    model: payload.model || null,
+    effort: payload.effort || payload.collaboration_mode?.settings?.reasoning_effort || null,
+    projectId: fallback.projectId || null,
+    projectName: fallback.projectName || null,
+    rolloutPath: fallback.rolloutPath || null,
+  };
+}
+
+function isCompleteExecutionProfile(profile) {
+  return Boolean(
+    profile?.cwd &&
+      profile?.approvalPolicy &&
+      profile?.sandboxPolicy?.type &&
+      profile?.permissionProfile?.type,
+  );
+}
+
+function normalizeSandboxPolicy(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    return { type: sandboxTypeToAppServer(value) };
+  }
+  if (!isObject(value)) return null;
+  const type = sandboxTypeToAppServer(value.type);
+  if (!type) return null;
+  return { ...value, type };
+}
+
+function normalizePermissionProfile(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    return { type: value };
+  }
+  if (!isObject(value) || !value.type) return null;
+  return value;
+}
+
+function normalizeApprovalPolicy(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
+function sandboxTypeToAppServer(type) {
+  switch (String(type || '').trim()) {
+    case 'danger-full-access':
+    case 'dangerFullAccess':
+      return 'dangerFullAccess';
+    case 'workspace-write':
+    case 'workspaceWrite':
+      return 'workspaceWrite';
+    case 'read-only':
+    case 'readOnly':
+      return 'readOnly';
+    case 'externalSandbox':
+      return 'externalSandbox';
+    default:
+      return '';
+  }
 }
 
 // 把一个 rollout 归到某个项目根：优先 thread-workspace-root-hints，其次取 cwd 的最长前缀匹配根。
@@ -378,6 +654,10 @@ function previewMessage(text) {
 // 详情正文：保留换行，仅把 $imagegen 包装成可读描述，限制单条长度。
 function transcriptMessage(text) {
   return cleanForTitle(text).slice(0, MAX_MESSAGE_CHARS);
+}
+
+function stripLongText(text) {
+  return String(text || '').trim().slice(0, MAX_MESSAGE_CHARS);
 }
 
 function cleanForTitle(text) {

@@ -103,7 +103,7 @@ test('tunneled loopback request authenticates with a registered appId', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'POST',
-      path: '/api/sessions',
+      path: '/api/mobile/chat',
       remoteAddress: '127.0.0.1',
       headers: {
         host: '127.0.0.1:4555',
@@ -142,11 +142,11 @@ test('CIDR whitelist allows remote clients as admin', () => {
   assert.equal(result.scope, 'admin');
 });
 
-test('registered appId bearer token allows app scoped session API', () => {
+test('registered appId bearer token allows mobile chat API', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'POST',
-      path: '/api/sessions',
+      path: '/api/mobile/chat',
       headers: { authorization: 'Bearer app-123' },
     }),
     security: secureConfig,
@@ -174,12 +174,13 @@ test('registered appId bearer token allows app scoped image uploads', () => {
   assert.equal(result.appId, 'app-123');
 });
 
-test('registered appId bearer token allows mobile runtime APIs', () => {
+test('registered appId bearer token denies admin runtime APIs', () => {
   for (const [method, path] of [
     ['GET', '/api/status'],
     ['GET', '/api/config'],
     ['GET', '/api/account'],
     ['GET', '/api/rate-limits'],
+    ['GET', '/api/events'],
     ['POST', '/api/codex/start'],
     ['POST', '/api/codex/restart'],
   ]) {
@@ -193,9 +194,8 @@ test('registered appId bearer token allows mobile runtime APIs', () => {
       apps: apps(['app-123']),
     });
 
-    assert.equal(result.allowed, true, `${method} ${path}`);
-    assert.equal(result.scope, 'app', `${method} ${path}`);
-    assert.equal(result.appId, 'app-123', `${method} ${path}`);
+    assert.equal(result.allowed, false, `${method} ${path}`);
+    assert.equal(result.statusCode, 403, `${method} ${path}`);
   }
 });
 
@@ -204,7 +204,7 @@ test('a disabled appId is rejected even with an otherwise valid bearer token', (
     get: (appId) => (appId === 'app-123' ? { appId: 'app-123', enabled: false } : null),
   };
   const result = evaluateApiAccess({
-    req: request({ method: 'POST', path: '/api/sessions', headers: { authorization: 'Bearer app-123' } }),
+    req: request({ method: 'POST', path: '/api/mobile/chat', headers: { authorization: 'Bearer app-123' } }),
     security: secureConfig,
     apps: disabledApps,
   });
@@ -213,7 +213,7 @@ test('a disabled appId is rejected even with an otherwise valid bearer token', (
   assert.equal(result.statusCode, 403);
 });
 
-test('registered appId bearer token allows every API route', () => {
+test('registered appId bearer token cannot create apps', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'POST',
@@ -224,12 +224,11 @@ test('registered appId bearer token allows every API route', () => {
     apps: apps(['app-123']),
   });
 
-  assert.equal(result.allowed, true);
-  assert.equal(result.scope, 'app');
-  assert.equal(result.appId, 'app-123');
+  assert.equal(result.allowed, false);
+  assert.equal(result.statusCode, 403);
 });
 
-test('registered appId bearer token can write global config by product design', () => {
+test('registered appId bearer token cannot write global config', () => {
   const result = evaluateApiAccess({
     req: request({
       method: 'PUT',
@@ -240,9 +239,30 @@ test('registered appId bearer token can write global config by product design', 
     apps: apps(['app-123']),
   });
 
-  assert.equal(result.allowed, true);
-  assert.equal(result.scope, 'app');
-  assert.equal(result.appId, 'app-123');
+  assert.equal(result.allowed, false);
+  assert.equal(result.statusCode, 403);
+});
+
+test('registered appId bearer token can call single-task and mobile helper APIs', () => {
+  for (const [method, path] of [
+    ['GET', '/api/health'],
+    ['POST', '/api/complete'],
+    ['POST', '/api/uploads/images'],
+    ['GET', '/api/sessions/session-1/files'],
+    ['POST', '/api/sessions/session-1/interrupt'],
+    ['GET', '/api/mobile/bootstrap'],
+    ['GET', '/api/mobile/events'],
+  ]) {
+    const result = evaluateApiAccess({
+      req: request({ method, path, headers: { authorization: 'Bearer app-123' } }),
+      security: secureConfig,
+      apps: apps(['app-123']),
+    });
+
+    assert.equal(result.allowed, true, `${method} ${path}`);
+    assert.equal(result.scope, 'app', `${method} ${path}`);
+    assert.equal(result.appId, 'app-123', `${method} ${path}`);
+  }
 });
 
 test('admin key allows all API routes', () => {

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { evaluateApiAccess, publicSecurityConfig } from './accessControl.js';
 import { AppRegistry, resolveAppEffectiveCodexConfig } from './appRegistry.js';
+import { sandboxModeFromPolicy, sandboxPolicyFromMode, threadExecutionParams, turnExecutionParams } from './appServerProtocol.js';
 import { CodexAppServerClient } from './codexAppServerClient.js';
 import { createHiddenCodexDirectiveStreamFilter, stripHiddenCodexDirectives } from './codexDirectives.js';
 import { createCodexSdkRuntime } from './codexSdkRuntime.js';
@@ -17,8 +18,13 @@ import { createImageUpload, extractWorkspaceImagePaths, isPathInside, resolveUpl
 import { readJsonBody, sendError, sendJson, sendText } from './json.js';
 import { attachmentSummary, buildMobileCodexInput, materializeMobileAttachments, toAppServerInput } from './mobileAttachments.js';
 import { orderMobileProjects } from './mobileProjects.js';
+import { resolveMobileSessionView } from './mobileSessionResolver.js';
+import { bridgeSessionMessages } from './mobileSessionView.js';
+import { createNativeHistoryMonitor } from './nativeHistoryMonitor.js';
 import { createOpenApiSpec } from './openapi.js';
+import { PushNotificationStore, buildCompletionPayload } from './pushNotifications.js';
 import { SessionStore, classifyConnectionNotice } from './sessionStore.js';
+import { normalizeStaticPathname } from './staticPaths.js';
 import { loadBridgeState, saveBridgeState } from './stateStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,11 +38,18 @@ const config = createRuntimeConfig();
 mergeConfig(config, persistedState.config);
 const apps = new AppRegistry({ apps: persistedState.apps });
 const store = new SessionStore({ sessions: persistedState.sessions });
+const pushNotifications = new PushNotificationStore({ state: persistedState.push });
 const history = createCodexHistory();
 const mobileRuntime = createCodexSdkRuntime();
 const mobileWarmups = new Map();
 const bus = new EventEmitter();
 bus.setMaxListeners(200);
+const nativeHistoryMonitor = createNativeHistoryMonitor({
+  history,
+  store,
+  publish,
+  intervalMs: nativeHistoryMonitorIntervalMs(),
+});
 
 let codex = createClient();
 wireClient(codex);
@@ -47,6 +60,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(config.server.port, config.server.host, () => {
   console.log(`Codex Bridge listening on http://${config.server.host}:${config.server.port}`);
+  startNativeHistoryMonitor();
   if (process.env.BRIDGE_CODEX_AUTOSTART !== '0') {
     codex
       .ensureStarted()
@@ -63,9 +77,16 @@ function createClient() {
 
 function wireClient(client) {
   client.on('notification', (event) => {
+    const turnId = event.params?.turnId || event.params?.turn?.id || null;
+    const wasEphemeral = store.isEphemeralTurn(turnId);
     store.applyNotification(event);
     schedulePersist();
     publish({ type: 'codex.notification', ...event });
+    if (!wasEphemeral && event.method === 'turn/completed') {
+      publishMobileUnread(event).catch((error) => {
+        publish({ type: 'bridge.mobile.unread.error', error: error.message, receivedAt: new Date().toISOString() });
+      });
+    }
   });
 
   client.on('serverRequest', (request) => {
@@ -87,6 +108,82 @@ function wireClient(client) {
 
 function publish(event) {
   bus.emit('event', event);
+}
+
+function startNativeHistoryMonitor() {
+  if (process.env.CODEX_BRIDGE_NATIVE_HISTORY_MONITOR === '0') {
+    publish({ type: 'bridge.native-history-monitor.disabled', receivedAt: new Date().toISOString() });
+    return;
+  }
+  nativeHistoryMonitor.start();
+  publish({ type: 'bridge.native-history-monitor.started', receivedAt: new Date().toISOString() });
+}
+
+function nativeHistoryMonitorIntervalMs() {
+  const value = Number(process.env.CODEX_BRIDGE_NATIVE_HISTORY_POLL_MS || '');
+  return Number.isFinite(value) && value >= 1000 ? value : undefined;
+}
+
+async function publishMobileUnread(event) {
+  const params = event.params || {};
+  const turn = params.turn || {};
+  if (turn.status && turn.status !== 'completed') {
+    return;
+  }
+
+  const threadId = params.threadId || params.thread?.id || '';
+  if (!threadId) {
+    return;
+  }
+
+  const bridgeSession = store.get(threadId);
+  if (bridgeSession) {
+    const project = await projectForCwd(bridgeSession.cwd);
+    publish({
+      type: 'bridge.mobile.unread',
+      sessionId: bridgeSession.id,
+      threadId: bridgeSession.threadId || bridgeSession.id,
+      title: bridgeSession.name || project?.name || projectNameFromPath(bridgeSession.cwd) || 'Codex 回复完成',
+      cwd: bridgeSession.cwd,
+      projectId: project?.id || null,
+      projectName: project?.name || projectNameFromPath(bridgeSession.cwd),
+      updatedAt: bridgeSession.updatedAt || event.receivedAt || new Date().toISOString(),
+      turnId: turn.id || params.turnId || null,
+      source: 'bridge',
+      receivedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const meta = await history.getThreadMeta(threadId);
+  if (!meta) {
+    return;
+  }
+  publish({
+    type: 'bridge.mobile.unread',
+    sessionId: threadId,
+    threadId,
+    title: meta.title || meta.projectName || 'Codex 回复完成',
+    cwd: meta.cwd,
+    projectId: meta.projectId || null,
+    projectName: meta.projectName || projectNameFromPath(meta.cwd),
+    updatedAt: meta.updatedAt || event.receivedAt || new Date().toISOString(),
+    turnId: turn.id || params.turnId || null,
+    source: 'codex-history',
+    receivedAt: new Date().toISOString(),
+  });
+}
+
+async function projectForCwd(cwd) {
+  if (!cwd) {
+    return null;
+  }
+  try {
+    const projects = await history.listProjects();
+    return pickProjectForCwd(projects, cwd);
+  } catch {
+    return null;
+  }
 }
 
 async function handleRequest(req, res) {
@@ -205,6 +302,46 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (route === 'GET /api/mobile/events') {
+    openMobileEventsSse(res);
+    return;
+  }
+
+  if (route === 'GET /api/mobile/push-public-key') {
+    sendJson(res, 200, { push: pushNotifications.publicInfo() });
+    return;
+  }
+
+  if (route === 'POST /api/mobile/push-subscriptions') {
+    await mobilePushSubscribe(req, res);
+    return;
+  }
+
+  if (route === 'POST /api/mobile/push-subscriptions/status') {
+    await mobilePushStatus(req, res);
+    return;
+  }
+
+  if (route === 'DELETE /api/mobile/push-subscriptions') {
+    await mobilePushUnsubscribe(req, res);
+    return;
+  }
+
+  if (route === 'POST /api/mobile/push/test') {
+    await mobilePushTest(req, res);
+    return;
+  }
+
+  if (route === 'POST /api/mobile/push/notify') {
+    await mobilePushNotify(req, res);
+    return;
+  }
+
+  if (route === 'POST /api/mobile/push/diagnostics') {
+    await mobilePushDiagnostics(req, res);
+    return;
+  }
+
   const mobileProjectSessionsMatch = url.pathname.match(/^\/api\/mobile\/projects\/([^/]+)\/sessions$/);
   if (req.method === 'GET' && mobileProjectSessionsMatch) {
     await mobileProjectSessions(req, res, decodeURIComponent(mobileProjectSessionsMatch[1]));
@@ -213,7 +350,7 @@ async function handleApi(req, res, url) {
 
   const mobileSessionMatch = url.pathname.match(/^\/api\/mobile\/sessions\/([^/]+)$/);
   if (req.method === 'GET' && mobileSessionMatch) {
-    await mobileSessionDetail(req, res, decodeURIComponent(mobileSessionMatch[1]));
+    await mobileSessionDetail(req, res, decodeURIComponent(mobileSessionMatch[1]), url);
     return;
   }
 
@@ -371,6 +508,7 @@ async function mobileBootstrap(req, res) {
       model: config.codex.model,
       appId: req.access?.appId ?? null,
     },
+    push: pushNotifications.publicInfo(),
   });
   warmDefaultMobileSession(defaultSession, req.access?.appId ?? null).catch((error) => {
     publish({ type: 'bridge.mobile.prewarm.error', error: error.message, receivedAt: new Date().toISOString() });
@@ -387,45 +525,141 @@ async function mobileProjectSessions(req, res, projectId) {
   });
 }
 
-async function mobileSessionDetail(req, res, sessionId) {
+async function mobileSessionDetail(req, res, sessionId, url) {
   void req;
-  const session = await getMobileSession(sessionId);
+  const session = await getMobileSession(sessionId, { source: url?.searchParams?.get('source') || '' });
   sendJson(res, 200, { session });
+}
+
+async function mobilePushSubscribe(req, res) {
+  const body = await readJsonBody(req);
+  const record = pushNotifications.upsert({
+    subscription: body.subscription || body,
+    appId: req.access?.scope === 'app' ? req.access.appId : body.appId || null,
+    deviceName: body.deviceName || '',
+    userAgent: req.headers['user-agent'] || '',
+  });
+  await persistState();
+  sendJson(res, 201, { ok: true, subscription: record, push: pushNotifications.publicInfo() });
+}
+
+async function mobilePushUnsubscribe(req, res) {
+  const body = await readJsonBody(req);
+  const removed = pushNotifications.remove({ id: body.id, endpoint: body.endpoint });
+  await persistState();
+  sendJson(res, 200, { ok: true, removed, push: pushNotifications.publicInfo() });
+}
+
+async function mobilePushStatus(req, res) {
+  const body = await readJsonBody(req);
+  const endpoint = String(body.endpoint || '').trim();
+  const subscription = pushNotifications.find({ endpoint });
+  const appId = req.access?.scope === 'app' ? req.access.appId : null;
+  const matchesScope = subscription && (!appId || !subscription.appId || subscription.appId === appId);
+  const registered = Boolean(subscription?.enabled !== false && matchesScope);
+  sendJson(res, 200, {
+    ok: true,
+    registered,
+    subscription: registered ? subscription : null,
+    push: pushNotifications.publicInfo(),
+  });
+}
+
+async function mobilePushTest(req, res) {
+  const body = await readJsonBody(req);
+  const result = await pushNotifications.notifyAll(
+    buildCompletionPayload({
+      title: 'Codex 通知已开启',
+      body: '以后电脑 Codex 回复完成会提醒你。',
+      url: buildMobileSessionUrl(req, body.sessionId || ''),
+      sessionId: body.sessionId || '',
+    }),
+    { appId: req.access?.scope === 'app' ? req.access.appId : null },
+  );
+  await persistState();
+  sendJson(res, 200, { ok: true, result });
+}
+
+async function mobilePushNotify(req, res) {
+  const body = await readJsonBody(req);
+  const sessionId = String(body.sessionId || body.threadId || '').trim();
+  const result = await pushNotifications.notifyAll(
+    buildCompletionPayload({
+      title: body.title || 'Codex 回复完成',
+      body: body.body || body.message || '电脑 Codex 有新回复，点开继续会话。',
+      url: body.url || buildMobileSessionUrl(req, sessionId),
+      sessionId,
+    }),
+    { appId: req.access?.scope === 'app' ? req.access.appId : null },
+  );
+  await persistState();
+  sendJson(res, 200, { ok: true, result });
+}
+
+async function mobilePushDiagnostics(req, res) {
+  const body = await readJsonBody(req);
+  const event = {
+    type: 'bridge.mobile.push.diagnostics',
+    stage: String(body.stage || '').slice(0, 60),
+    status: String(body.status || '').slice(0, 60),
+    message: String(body.message || '').slice(0, 300),
+    rawMessage: String(body.rawMessage || '').slice(0, 300),
+    name: String(body.name || '').slice(0, 80),
+    code: body.code ?? null,
+    permission: String(body.permission || '').slice(0, 40),
+    hasServiceWorker: Boolean(body.hasServiceWorker),
+    hasPushManager: Boolean(body.hasPushManager),
+    hasNotification: Boolean(body.hasNotification),
+    standalone: Boolean(body.standalone),
+    appIdScope: req.access?.scope || null,
+    userAgent: String(req.headers['user-agent'] || '').slice(0, 260),
+    receivedAt: new Date().toISOString(),
+  };
+  publish(event);
+  console.warn('[mobile-push-diagnostics]', JSON.stringify(event));
+  sendJson(res, 200, { ok: true });
 }
 
 async function mobileChatStream(req, res) {
   const body = await readJsonBody(req);
   const text = String(body.text ?? body.prompt ?? '').trim();
   const attachments = Array.isArray(body.attachments) ? body.attachments : [];
-  if (!text && attachments.length === 0) {
+  const hasStructuredInput = Array.isArray(body.input) && body.input.length > 0;
+  if (!text && attachments.length === 0 && !hasStructuredInput) {
     const error = new Error('请输入文字或上传附件');
     error.statusCode = 400;
     throw error;
   }
 
-  const appId = body.appId || (req.access?.scope === 'app' ? req.access.appId : null);
+  const appId = req.access?.scope === 'app' ? req.access.appId : body.appId || null;
   const app = appId ? apps.get(appId) : null;
   const target = await resolveMobileChatTarget(body, appId);
   const uploadRoot = app?.workspaceRoot || path.join(projectRoot, 'data');
   const files = await materializeMobileAttachments({ attachments, root: uploadRoot });
-  const input = toAppServerInput(
-    buildMobileCodexInput({
-      text,
-      files,
-      imageMode: body.mode === 'image' || body.output === 'image',
-    }),
-  );
+  const input = [
+    ...toAppServerInput(
+      buildMobileCodexInput({
+        text,
+        files,
+        imageMode: body.mode === 'image' || body.output === 'image',
+      }),
+    ),
+    ...extraMobileInput(body, text),
+  ];
 
   await codex.ensureStarted();
   const request = {
     appId,
     name: target.title || text.slice(0, 34) || config.ui.defaultSessionName,
-    cwd: target.cwd,
-    model: body.model ?? config.codex.model,
-    effort: body.effort ?? config.codex.effort,
+    cwd: target.executionProfile.cwd,
+    model: target.executionProfile.model ?? config.codex.model,
+    effort: target.executionProfile.effort ?? config.codex.effort,
     speed: body.speed ?? config.codex.speed,
-    approvalPolicy: body.approvalPolicy ?? config.codex.approvalPolicy,
-    sandbox: body.sandbox ?? config.codex.sandbox,
+    approvalPolicy: target.executionProfile.approvalPolicy,
+    sandbox: sandboxModeFromPolicy(target.executionProfile.sandboxPolicy),
+    sandboxPolicy: target.executionProfile.sandboxPolicy,
+    permissionProfile: target.executionProfile.permissionProfile,
+    executionProfile: target.executionProfile,
     serviceName: config.codex.serviceName,
     ephemeral: false,
     experimentalRawEvents: config.codex.experimentalRawEvents,
@@ -436,22 +670,20 @@ async function mobileChatStream(req, res) {
   if (target.threadId) {
     const result = await codex.request('thread/resume', {
       threadId: target.threadId,
-      cwd: target.cwd,
+      ...threadExecutionParams(target.executionProfile),
       approvalPolicy: request.approvalPolicy,
-      sandbox: request.sandbox,
       model: request.model,
       persistExtendedHistory: true,
       excludeTurns: false,
     });
     session = store.upsertResumedSession({ thread: result.thread, request, config });
-    session.cwd = target.cwd;
+    session.cwd = target.executionProfile.cwd;
     if (appId && !session.appId) session.appId = appId;
   } else {
     const result = await codex.request('thread/start', {
       model: request.model,
-      cwd: request.cwd,
+      ...threadExecutionParams(target.executionProfile),
       approvalPolicy: request.approvalPolicy,
-      sandbox: request.sandbox,
       serviceName: request.serviceName,
       ephemeral: request.ephemeral,
       experimentalRawEvents: request.experimentalRawEvents,
@@ -470,30 +702,21 @@ async function mobileChatStream(req, res) {
 }
 
 async function resolveDefaultMobileSession(projects) {
-  const preferredProject = pickProjectForCwd(projects, config.codex.cwd);
-  const latestBridge = pickLatestBridgeSession(preferredProject);
-  const latestNative = preferredProject ? await latestNativeThread(preferredProject) : null;
+  const latestBridge = pickLatestBridgeSession(null);
+  const sortedProjects = [...projects]
+    .filter((project) => project.conversationCount > 0)
+    .sort((a, b) => toTime(b.lastActivity) - toTime(a.lastActivity));
+  let latestNative = null;
+  for (const project of sortedProjects.slice(0, 8)) {
+    latestNative = await latestNativeThread(project);
+    if (latestNative) break;
+  }
 
-  if (latestBridge && (!latestNative || toTime(latestBridge.updatedAt) >= toTime(latestNative.startedAt))) {
+  if (latestBridge && (!latestNative || toTime(latestBridge.updatedAt) >= toTime(latestNative.updatedAt || latestNative.startedAt))) {
     return mobileBridgeSession(latestBridge);
   }
   if (latestNative) {
     return mobileNativeSession(await history.getThread(latestNative.id));
-  }
-
-  const fallbackBridge = pickLatestBridgeSession(null);
-  if (fallbackBridge) {
-    return mobileBridgeSession(fallbackBridge);
-  }
-
-  const sortedProjects = [...projects]
-    .filter((project) => project.conversationCount > 0)
-    .sort((a, b) => toTime(b.lastActivity) - toTime(a.lastActivity));
-  for (const project of sortedProjects.slice(0, 8)) {
-    const thread = await latestNativeThread(project);
-    if (thread) {
-      return mobileNativeSession(await history.getThread(thread.id));
-    }
   }
   return null;
 }
@@ -517,33 +740,32 @@ async function warmDefaultMobileSession(defaultSession, appId) {
 async function prepareDefaultMobileSession(defaultSession, appId) {
   await codex.ensureStarted();
   let session = store.get(defaultSession.id);
-  let cwd = session?.cwd || defaultSession.cwd;
-  if (!session) {
-    const meta = await history.getThreadMeta(defaultSession.id);
-    cwd = meta?.cwd || cwd;
+  let executionProfile = session?.executionProfile || null;
+  if (!executionProfile && defaultSession.id) {
+    executionProfile = await history.getThreadExecutionProfile(defaultSession.id);
   }
-  if (!cwd) {
+  if (!executionProfile) {
     return;
   }
   const result = await codex.request('thread/resume', {
     threadId: defaultSession.id,
-    cwd,
-    approvalPolicy: config.codex.approvalPolicy,
-    sandbox: config.codex.sandbox,
-    model: config.codex.model,
+    ...threadExecutionParams(executionProfile),
+    approvalPolicy: executionProfile.approvalPolicy,
+    model: executionProfile.model ?? config.codex.model,
     persistExtendedHistory: true,
     excludeTurns: false,
   });
   session = store.upsertResumedSession({
     thread: result.thread,
     request: {
-      cwd,
+      cwd: executionProfile.cwd,
+      executionProfile,
       appId: appId || session?.appId || null,
       name: defaultSession.title || defaultSession.projectName || defaultSession.id,
     },
     config,
   });
-  session.cwd = cwd;
+  session.cwd = executionProfile.cwd;
   if (appId && !session.appId) session.appId = appId;
   await persistState();
   prewarmSession(session);
@@ -578,12 +800,14 @@ function pickLatestBridgeSession(project = null) {
   return sessions.find((session) => session.messages.length > 0) || sessions[0] || null;
 }
 
-async function getMobileSession(sessionId) {
-  const bridgeSession = store.get(sessionId);
-  if (bridgeSession) {
-    return mobileBridgeSession(bridgeSession);
-  }
-  return mobileNativeSession(await history.getThread(sessionId));
+async function getMobileSession(sessionId, { source = '' } = {}) {
+  return resolveMobileSessionView(sessionId, {
+    source,
+    store,
+    history,
+    toBridgeSession: mobileBridgeSession,
+    toNativeSession: mobileNativeSession,
+  });
 }
 
 async function resolveMobileChatTarget(body, appId) {
@@ -591,17 +815,19 @@ async function resolveMobileChatTarget(body, appId) {
   if (sessionId) {
     const bridgeSession = store.get(sessionId);
     if (bridgeSession) {
+      const executionProfile = await resolveExecutionProfileForSession(bridgeSession);
       return {
         threadId: bridgeSession.threadId,
         session: bridgeSession,
-        cwd: bridgeSession.cwd,
+        cwd: executionProfile.cwd,
         title: bridgeSession.name,
         created: false,
         source: 'bridge',
+        executionProfile,
       };
     }
-    const meta = await history.getThreadMeta(sessionId);
-    if (!meta) {
+    const executionProfile = await history.getThreadExecutionProfile(sessionId);
+    if (!executionProfile) {
       const error = new Error(`未知 session：${sessionId}`);
       error.statusCode = 404;
       throw error;
@@ -609,45 +835,71 @@ async function resolveMobileChatTarget(body, appId) {
     const session = store.upsertResumedSession({
       thread: { id: sessionId, sessionId },
       request: {
-        cwd: meta.cwd,
+        cwd: executionProfile.cwd,
+        executionProfile,
         appId,
-        name: meta.projectName || sessionId,
+        name: executionProfile.projectName || sessionId,
       },
       config,
     });
-    session.cwd = meta.cwd;
+    session.cwd = executionProfile.cwd;
     session.appId ||= appId;
     return {
       threadId: sessionId,
       session,
-      cwd: meta.cwd,
-      title: meta.projectName,
+      cwd: executionProfile.cwd,
+      title: executionProfile.projectName,
       created: false,
       source: 'codex-history',
+      executionProfile,
     };
   }
 
-  const cwd = await resolveMobileCwd(body);
+  const executionProfile = await resolveMobileProjectExecutionProfile(body);
   return {
     threadId: null,
     session: null,
-    cwd,
+    cwd: executionProfile.cwd,
     title: body.title || null,
     created: true,
     source: 'new',
+    executionProfile,
   };
 }
 
-async function resolveMobileCwd(body) {
+async function resolveMobileProjectExecutionProfile(body) {
   if (body.projectId) {
-    const projects = await history.listProjects();
-    const project = projects.find((item) => item.id === body.projectId);
-    if (project?.path) return project.path;
+    const profile = await history.getProjectExecutionProfile(body.projectId);
+    if (profile) return profile;
   }
-  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
-    return body.cwd;
+  const error = new Error('无法解析桌面端执行权限状态。请先在 Windows Codex App 中打开该项目或选择已有桌面会话后再从手机发送。');
+  error.statusCode = 409;
+  error.code = 'execution_profile_unresolved';
+  throw error;
+}
+
+async function resolveExecutionProfileForSession(session, { allowBridgeDefaults = false } = {}) {
+  if (isCompleteExecutionProfile(session.executionProfile)) {
+    return session.executionProfile;
   }
-  return config.codex.cwd;
+  const profile = await history.getThreadExecutionProfile(session.threadId || session.id);
+  if (profile) {
+    session.executionProfile = profile;
+    session.cwd = profile.cwd;
+    session.approvalPolicy = profile.approvalPolicy;
+    session.sandboxPolicy = profile.sandboxPolicy;
+    session.permissionProfile = profile.permissionProfile;
+    session.workspaceRoots = profile.workspaceRoots;
+    session.sandbox = sandboxModeFromPolicy(profile.sandboxPolicy) || session.sandbox;
+    return profile;
+  }
+  if (allowBridgeDefaults) {
+    return sessionExecutionProfileFromBridgeDefaults(session);
+  }
+  const error = new Error('无法解析桌面端执行权限状态。请从 Codex 桌面端打开一次该会话后再从手机继续。');
+  error.statusCode = 409;
+  error.code = 'execution_profile_unresolved';
+  throw error;
 }
 
 function mobileBridgeSession(session) {
@@ -660,14 +912,7 @@ function mobileBridgeSession(session) {
     projectName: projectNameFromPath(session.cwd),
     updatedAt: session.updatedAt,
     needsResume: true,
-    messages: (session.messages || [])
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .map((message) => ({
-        role: message.role,
-        text: stripHiddenCodexDirectives(message.text || '').text,
-        status: message.status || 'done',
-        at: message.updatedAt || message.createdAt || null,
-      })),
+    messages: bridgeSessionMessages(session),
   };
 }
 
@@ -680,6 +925,8 @@ function mobileNativeSession(thread) {
     cwd: thread.cwd,
     projectId: thread.projectId,
     projectName: thread.projectName,
+    startedAt: thread.startedAt,
+    updatedAt: thread.updatedAt || thread.startedAt,
     needsResume: true,
     messages: (thread.messages || []).map((message) => ({
       role: message.role,
@@ -698,6 +945,7 @@ function mobileThreadSummary(thread, project) {
     preview: thread.preview || '',
     cwd: thread.cwd,
     startedAt: thread.startedAt,
+    updatedAt: thread.updatedAt || thread.startedAt,
     source: 'codex-history',
     project: project ? { id: project.id, name: project.name, path: project.path } : null,
   };
@@ -740,6 +988,34 @@ function toTime(value) {
   return Number.isFinite(time) ? time : 0;
 }
 
+function isCompleteExecutionProfile(profile) {
+  return Boolean(
+    profile?.cwd &&
+      profile?.approvalPolicy &&
+      profile?.sandboxPolicy?.type &&
+      profile?.permissionProfile?.type,
+  );
+}
+
+function sessionExecutionProfileFromBridgeDefaults(session) {
+  const profile = {
+    source: 'bridge-admin-default',
+    threadId: session.threadId || session.id,
+    cwd: session.cwd || config.codex.cwd,
+    workspaceRoots: session.cwd ? [session.cwd] : [],
+    approvalPolicy: session.approvalPolicy || config.codex.approvalPolicy,
+    sandboxPolicy: sandboxPolicyFromMode(session.sandbox || config.codex.sandbox),
+    permissionProfile: session.permissionProfile || { type: 'managed' },
+    model: session.model ?? config.codex.model,
+    effort: session.effort ?? config.codex.effort,
+  };
+  session.executionProfile = profile;
+  session.sandboxPolicy = profile.sandboxPolicy;
+  session.permissionProfile = profile.permissionProfile;
+  session.workspaceRoots = profile.workspaceRoots;
+  return profile;
+}
+
 async function createSession(req, res) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
@@ -780,8 +1056,8 @@ async function createSession(req, res) {
 async function resumeNativeThread(req, res, threadId) {
   await codex.ensureStarted();
   const body = await readJsonBody(req);
-  const meta = await history.getThreadMeta(threadId);
-  if (!meta) {
+  const executionProfile = await history.getThreadExecutionProfile(threadId);
+  if (!executionProfile) {
     const error = new Error(`未找到历史对话：${threadId}`);
     error.statusCode = 404;
     throw error;
@@ -789,22 +1065,22 @@ async function resumeNativeThread(req, res, threadId) {
   const existing = store.get(threadId);
   const result = await codex.request('thread/resume', {
     threadId,
-    cwd: meta.cwd,
-    approvalPolicy: config.codex.approvalPolicy,
-    sandbox: config.codex.sandbox,
-    model: config.codex.model,
+    ...threadExecutionParams(executionProfile),
+    approvalPolicy: executionProfile.approvalPolicy,
+    model: executionProfile.model ?? config.codex.model,
     persistExtendedHistory: true,
     excludeTurns: false,
   });
   const claimedAppId = body.appId ?? (req.access?.scope === 'app' ? req.access.appId : null) ?? existing?.appId ?? null;
   const request = {
-    cwd: meta.cwd,
-    name: existing?.name || meta.projectName || threadId,
+    cwd: executionProfile.cwd,
+    executionProfile,
+    name: existing?.name || executionProfile.projectName || threadId,
     appId: claimedAppId,
   };
   const session = store.upsertResumedSession({ thread: result.thread, request, config });
   // upsert 不改既有会话的 cwd/appId，这里显式落实：手机端 appId 认领该会话，cwd 用历史真实目录。
-  session.cwd = meta.cwd;
+  session.cwd = executionProfile.cwd;
   session.appId = claimedAppId;
   await persistState();
   publish({ type: 'bridge.session.resumed', session: summarySession(session), receivedAt: new Date().toISOString() });
@@ -851,16 +1127,16 @@ async function handleSessionRoute(req, res, url, sessionId, action) {
   if (req.method === 'POST' && action === 'resume') {
     await codex.ensureStarted();
     const body = await readJsonBody(req);
+    const executionProfile = await resolveExecutionProfileForSession(session, { allowBridgeDefaults: req.access?.scope === 'admin' });
     const result = await codex.request('thread/resume', {
       threadId: session.threadId,
-      cwd: session.cwd,
-      approvalPolicy: body.approvalPolicy || session.approvalPolicy,
-      sandbox: body.sandbox || session.sandbox,
-      model: body.model ?? session.model,
+      ...threadExecutionParams(executionProfile),
+      approvalPolicy: executionProfile.approvalPolicy,
+      model: body.model ?? executionProfile.model ?? session.model,
       persistExtendedHistory: true,
       excludeTurns: false,
     });
-    const resumed = store.upsertResumedSession({ thread: result.thread, request: body, config });
+    const resumed = store.upsertResumedSession({ thread: result.thread, request: { ...body, executionProfile }, config });
     await persistState();
     sendJson(res, 200, { session: resumed });
     return;
@@ -941,16 +1217,17 @@ async function startTurn(req, res, url, sessionId) {
   assertSessionAccess(req, session);
   const body = await readJsonBody(req);
   const input = normalizeInput(body);
+  const executionProfile = await resolveExecutionProfileForSession(session, { allowBridgeDefaults: req.access?.scope === 'admin' });
   await settlePrewarm(session);
   const wait = url.searchParams.get('wait') === '1';
   const completionPromise = wait ? waitForTurnCompleted(session.threadId) : null;
   const result = await codex.request('turn/start', {
     threadId: session.threadId,
     input,
-    approvalPolicy: body.approvalPolicy,
-    sandboxPolicy: body.sandboxPolicy,
-    model: body.model ?? session.model,
-    effort: body.effort ?? session.effort,
+    approvalPolicy: executionProfile.approvalPolicy,
+    ...turnExecutionParams(executionProfile),
+    model: body.model ?? executionProfile.model ?? session.model,
+    effort: body.effort ?? executionProfile.effort ?? session.effort,
     personality: body.personality,
     serviceTier: body.serviceTier,
     outputSchema: body.outputSchema,
@@ -1082,12 +1359,18 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
     cleanup();
     scanImages(assistantText, turn?.id ?? activeTurnId);
     Promise.allSettled(imageScans).then(() => {
+      const status = turn?.status === 'interrupted' ? 'interrupted' : 'completed';
       writeTypedSse(res, 'done', {
         turnId: turn?.id ?? activeTurnId,
-        status: turn?.status === 'interrupted' ? 'interrupted' : 'completed',
+        status,
         finalText: assistantText,
       });
       res.end();
+      if (status === 'completed') {
+        notifySessionComplete(req, session, assistantText, { appId }).catch((error) => {
+          publish({ type: 'bridge.push.error', error: error.message, sessionId: session.id, receivedAt: new Date().toISOString() });
+        });
+      }
     });
   }
 
@@ -1169,13 +1452,14 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
 
   let result;
   try {
+    const executionProfile = await resolveExecutionProfileForSession(session, { allowBridgeDefaults: req.access?.scope === 'admin' });
     result = await codex.request('turn/start', {
       threadId: session.threadId,
       input,
-      approvalPolicy: body.approvalPolicy,
-      sandboxPolicy: body.sandboxPolicy,
-      model: body.model ?? session.model,
-      effort: body.effort ?? session.effort,
+      approvalPolicy: executionProfile.approvalPolicy,
+      ...turnExecutionParams(executionProfile),
+      model: body.model ?? executionProfile.model ?? session.model,
+      effort: body.effort ?? executionProfile.effort ?? session.effort,
     });
   } catch (error) {
     failStream('turn_start_failed', error.message);
@@ -1198,24 +1482,13 @@ async function streamTurn(req, res, session, body, { created = false } = {}) {
 }
 
 // ===== 无状态结构化补全 /api/complete =====
-// 一次性 AI 任务（生成图、写文档、抽取/生成 JSON 等）的统一入口：
-//   建临时 ephemeral thread → 跑一轮 → 返回结果 → 丢弃 thread。
-// 关键：全程不 createSession、不 persist —— 这条调用不进 /api/sessions、不写 bridge-state.json。
-// 默认非流式返回 { status, text, parsed?, artifacts[] }；stream:true / ?stream=1 走类型化 SSE。
+// 单次任务走 Codex SDK：不进入 app-server 的 thread/turn 管理，也不写 Bridge session。
+// 它仍然复用桌面执行画像，避免手机/外部调用偷偷掉到 Bridge 默认 cwd/sandbox。
 async function completeTask(req, res, url) {
-  await codex.ensureStarted();
   const body = await readJsonBody(req);
 
-  // appId 是远程访问钥匙，不再作为租户隔离边界；未指定 appId 时用当前钥匙认领。
   if (req.access?.scope === 'app') {
     body.appId ||= req.access.appId;
-  }
-
-  const app = body.appId ? apps.require(body.appId) : null;
-  const request = normalizeSessionRequest(body, app);
-  // 仅允许把 cwd 指到“历史里出现过的项目根”，避免把任意路径当可写工作目录。
-  if (body.cwd && (await history.isProjectRoot(body.cwd))) {
-    request.cwd = body.cwd;
   }
 
   const input = normalizeInput(body);
@@ -1231,146 +1504,177 @@ async function completeTask(req, res, url) {
     url.searchParams.get('stream') === '1' ||
     String(req.headers.accept || '').toLowerCase().includes('text/event-stream');
 
-  // 临时 thread：强制 ephemeral，绝不写 codex 历史。
-  const started = await codex.request('thread/start', {
-    model: request.model,
-    cwd: request.cwd,
-    approvalPolicy: request.approvalPolicy,
-    sandbox: request.sandbox,
-    serviceName: request.serviceName,
-    ephemeral: true,
-    experimentalRawEvents: request.experimentalRawEvents,
-    persistExtendedHistory: false,
-  });
-
+  const executionProfile = await resolveCompleteExecutionProfile(req, body);
   const ctx = {
-    threadId: started.thread.id,
-    cwd: request.cwd,
+    cwd: executionProfile.cwd,
+    executionProfile,
     appId: body.appId || (req.access?.scope === 'app' ? req.access.appId : null),
     baseUrl: requestBaseUrl(req),
-    input,
+    input: toSdkInput(input),
     outputSchema: body.outputSchema,
-    model: body.model ?? request.model,
-    effort: body.effort ?? request.effort,
-    approvalPolicy: body.approvalPolicy,
-    sandboxPolicy: body.sandboxPolicy,
+    sdkOptions: sdkOptionsFromExecutionProfile(executionProfile),
   };
 
   if (wantsStream) {
-    await streamComplete(req, res, ctx);
+    await streamSdkComplete(req, res, ctx);
   } else {
-    await awaitComplete(req, res, ctx);
+    await awaitSdkComplete(req, res, ctx);
   }
 }
 
-// 在临时 thread 上发起一轮并下发结构化输出（outputSchema）——这正是流式 turns 路径之前缺的能力。
-async function startEphemeralTurn(ctx) {
-  const result = await codex.request('turn/start', {
-    threadId: ctx.threadId,
-    input: ctx.input,
-    approvalPolicy: ctx.approvalPolicy,
-    sandboxPolicy: ctx.sandboxPolicy,
-    model: ctx.model,
-    effort: ctx.effort,
-    // strict 模式规整：调用方传普通 JSON Schema 即可，这里补齐 additionalProperties/required。
-    outputSchema: ctx.outputSchema ? toStrictJsonSchema(ctx.outputSchema) : undefined,
-  });
-  return result.turn.id;
+async function resolveCompleteExecutionProfile(req, body) {
+  const sessionId = String(body.sessionId || body.threadId || '').trim();
+  if (sessionId) {
+    const session = store.get(sessionId);
+    if (session) {
+      return resolveExecutionProfileForSession(session, { allowBridgeDefaults: req.access?.scope === 'admin' });
+    }
+    const profile = await history.getThreadExecutionProfile(sessionId);
+    if (profile) return profile;
+  }
+
+  if (body.projectId) {
+    const profile = await history.getProjectExecutionProfile(body.projectId);
+    if (profile) return profile;
+  }
+
+  if (req.access?.scope === 'admin') {
+    const cwd = body.cwd && (await isExistingDirectory(body.cwd)) ? body.cwd : config.codex.cwd;
+    return {
+      source: 'bridge-admin-default',
+      cwd,
+      workspaceRoots: [cwd],
+      approvalPolicy: body.approvalPolicy || config.codex.approvalPolicy,
+      sandboxPolicy: body.sandboxPolicy || sandboxPolicyFromMode(body.sandbox || config.codex.sandbox),
+      permissionProfile: { type: 'managed' },
+      model: body.model ?? config.codex.model,
+      effort: body.effort ?? config.codex.effort,
+    };
+  }
+
+  const error = new Error('complete 缺少可用桌面执行画像，请传入 sessionId/threadId 或 projectId');
+  error.statusCode = 409;
+  error.code = 'execution_profile_unresolved';
+  throw error;
 }
 
-// 跑一轮并累计助手文本：监听器必须在 turn/start 之前挂上，否则会漏掉开头的 delta（bus 是同步 EventEmitter）。
-// 不依赖 SessionStore；resolve { status, text, turnId, usage }。
-function runEphemeralTurn(ctx, { onDelta, onTurnId } = {}) {
-  const { threadId } = ctx;
-  return new Promise((resolve) => {
-    let streamedText = '';
-    const completedTexts = [];
-    let activeTurnId = null;
-    let usage = null;
-    let settled = false;
-    let safety = null;
-    const directiveFilter = createHiddenCodexDirectiveStreamFilter();
+function sdkOptionsFromExecutionProfile(profile) {
+  const additionalDirectories = (profile.workspaceRoots || []).filter((root) => normPath(root) && normPath(root) !== normPath(profile.cwd));
+  return {
+    cwd: profile.cwd,
+    model: profile.model ?? config.codex.model,
+    effort: profile.effort ?? config.codex.effort,
+    approvalPolicy: profile.approvalPolicy,
+    sandboxPolicy: profile.sandboxPolicy,
+    additionalDirectories,
+  };
+}
 
-    // 最终文本优先用 item/completed 的权威全文（结构化输出常常一次性给完、无逐字 delta）；
-    // 没有 completed 文本时才退回累计的 delta。
-    function finalText() {
-      return completedTexts.length ? completedTexts.join('\n') : streamedText;
+function toSdkInput(input) {
+  return input.map((item) => {
+    if (item.type === 'text') {
+      return { type: 'text', text: String(item.text || '') };
     }
-
-    function done(status) {
-      if (settled) {
-        return;
-      }
-      const tail = directiveFilter.flush();
-      if (tail) {
-        streamedText += tail;
-        onDelta?.(tail, activeTurnId);
-      }
-      settled = true;
-      bus.off('event', onEvent);
-      clearTimeout(safety);
-      resolve({ status, text: finalText(), turnId: activeTurnId, usage });
+    if (item.type === 'localImage' || item.type === 'local_image') {
+      return { type: 'local_image', path: item.path };
     }
-
-    function onEvent(event) {
-      if (settled || event.params?.threadId !== threadId) {
-        return;
-      }
-      const params = event.params || {};
-      if (event.method === 'item/agentMessage/delta') {
-        if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
-          return;
-        }
-        const delta = directiveFilter.push(params.delta ?? '');
-        if (!delta) {
-          return;
-        }
-        streamedText += delta;
-        onDelta?.(delta, params.turnId ?? activeTurnId);
-      } else if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
-        if (activeTurnId && params.turnId && params.turnId !== activeTurnId) {
-          return;
-        }
-        if (typeof params.item.text === 'string') {
-          completedTexts.push(stripHiddenCodexDirectives(params.item.text).text);
-        }
-      } else if (event.method === 'thread/tokenUsage/updated') {
-        // 临时 thread 只跑这一轮，thread 累计用量即本次 complete 的用量。
-        usage = params.tokenUsage ?? params.usage ?? null;
-      } else if (event.method === 'turn/completed') {
-        const turn = params.turn || {};
-        if (activeTurnId && turn.id && turn.id !== activeTurnId) {
-          return;
-        }
-        if (turn.status === 'failed') {
-          ctx._error = turn.error?.message || 'turn 执行失败';
-          done('error');
-          return;
-        }
-        done(turn.status === 'interrupted' ? 'interrupted' : 'completed');
-      }
+    if (item.type === 'image' && item.url) {
+      return { type: 'text', text: `图片 URL：${item.url}` };
     }
-
-    bus.on('event', onEvent);
-    safety = setTimeout(() => done('timeout'), 10 * 60 * 1000);
-
-    startEphemeralTurn(ctx)
-      .then((turnId) => {
-        activeTurnId = turnId;
-        // 登记为 ephemeral turn：让 store 完全忽略这轮事件（不进全局事件环），turn/completed 时自动清理。
-        store.registerEphemeralTurn(turnId);
-        onTurnId?.(turnId);
-      })
-      .catch((error) => {
-        ctx._error = error.message;
-        done('error');
-      });
+    return { type: 'text', text: JSON.stringify(item) };
   });
 }
 
-// 临时 thread 用完即弃：best-effort。ephemeral 本就不落 codex 历史，归档失败也无所谓。
-function discardThread(threadId) {
-  codex.request('thread/archive', { threadId }).catch(() => {});
+async function awaitSdkComplete(req, res, ctx) {
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
+  let result;
+  try {
+    result = await mobileRuntime.run(ctx.input, ctx.sdkOptions, {
+      outputSchema: ctx.outputSchema ? toStrictJsonSchema(ctx.outputSchema) : undefined,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    sendError(res, Object.assign(new Error(error.message || 'complete 失败'), { statusCode: 502 }));
+    return;
+  }
+  const artifacts = await collectArtifacts(result.finalResponse, ctx);
+  const payload = { status: 'completed', text: result.finalResponse, artifacts, usage: result.usage ?? null };
+  if (ctx.outputSchema) {
+    const parsed = tryParseJson(result.finalResponse);
+    payload.parsed = parsed.ok ? parsed.value : null;
+    if (!parsed.ok) payload.parseError = parsed.error;
+  }
+  sendJson(res, 200, payload);
+}
+
+async function streamSdkComplete(req, res, ctx) {
+  const controller = new AbortController();
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  const emit = (event, payload) => {
+    if (!res.writableEnded) writeTypedSse(res, event, payload);
+  };
+  emit('start', { cwd: ctx.cwd, appId: ctx.appId, runtime: 'codex-sdk' });
+  let seq = 0;
+  let finalText = '';
+  let usage = null;
+  const itemTexts = new Map();
+  const heartbeat = setInterval(() => emit('ping', { t: new Date().toISOString() }), 15000);
+  res.on('close', () => {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) controller.abort();
+  });
+
+  try {
+    const streamed = await mobileRuntime.runStreamed(ctx.input, ctx.sdkOptions, {
+      outputSchema: ctx.outputSchema ? toStrictJsonSchema(ctx.outputSchema) : undefined,
+      signal: controller.signal,
+    });
+    for await (const event of streamed.events) {
+      if (event.type === 'thread.started') {
+        emit('thread', { threadId: event.thread_id });
+      } else if ((event.type === 'item.updated' || event.type === 'item.completed') && event.item?.type === 'agent_message') {
+        const previous = itemTexts.get(event.item.id) || '';
+        const text = stripHiddenCodexDirectives(event.item.text || '').text;
+        const delta = text.startsWith(previous) ? text.slice(previous.length) : text;
+        itemTexts.set(event.item.id, text);
+        finalText = text || finalText;
+        if (delta) emit('delta', { delta, seq: seq++ });
+      } else if (event.type === 'turn.completed') {
+        usage = event.usage ?? null;
+      } else if (event.type === 'turn.failed') {
+        emit('error', { code: 'turn_failed', message: event.error?.message || 'complete 失败' });
+        res.end();
+        return;
+      } else if (event.type === 'error') {
+        emit('error', { code: 'sdk_error', message: event.message || 'complete 失败' });
+        res.end();
+        return;
+      }
+    }
+    clearInterval(heartbeat);
+    const artifacts = await collectArtifacts(finalText, ctx);
+    for (const artifact of artifacts) emit('artifact', artifact);
+    const donePayload = { status: 'completed', finalText, artifacts, usage };
+    if (ctx.outputSchema) {
+      const parsed = tryParseJson(finalText);
+      donePayload.parsed = parsed.ok ? parsed.value : null;
+      if (!parsed.ok) donePayload.parseError = parsed.error;
+    }
+    emit('done', donePayload);
+    res.end();
+  } catch (error) {
+    clearInterval(heartbeat);
+    emit('error', { code: 'sdk_error', message: error.message || 'complete 失败' });
+    res.end();
+  }
 }
 
 async function isExistingDirectory(rawPath) {
@@ -1424,97 +1728,6 @@ async function buildArtifact(absPath) {
   return artifact;
 }
 
-// 非流式：等 turn 完成，返回 { status, text, parsed?, artifacts }。
-async function awaitComplete(req, res, ctx) {
-  let turnId = null;
-  res.on('close', () => {
-    if (turnId && !res.writableEnded) {
-      codex.request('turn/interrupt', { threadId: ctx.threadId, turnId }).catch(() => {});
-    }
-  });
-
-  const result = await runEphemeralTurn(ctx, { onTurnId: (id) => { turnId = id; } });
-  discardThread(ctx.threadId);
-
-  if (result.status === 'error') {
-    sendError(res, Object.assign(new Error(ctx._error || 'complete 失败'), { statusCode: 502 }));
-    return;
-  }
-  if (result.status === 'timeout') {
-    sendError(res, Object.assign(new Error('complete 等待超时'), { statusCode: 504 }));
-    return;
-  }
-
-  const artifacts = await collectArtifacts(result.text, ctx);
-  const payload = { status: result.status, text: result.text, artifacts, usage: result.usage ?? null };
-  if (ctx.outputSchema) {
-    const parsed = tryParseJson(result.text);
-    payload.parsed = parsed.ok ? parsed.value : null;
-    if (!parsed.ok) {
-      payload.parseError = parsed.error;
-    }
-  }
-  sendJson(res, 200, payload);
-}
-
-// 流式：类型化 SSE（start / delta / artifact / done / error / ping）。
-async function streamComplete(req, res, ctx) {
-  res.writeHead(200, {
-    'content-type': 'text/event-stream; charset=utf-8',
-    'cache-control': 'no-store',
-    connection: 'keep-alive',
-    'x-accel-buffering': 'no',
-  });
-  const emit = (event, payload) => {
-    if (!res.writableEnded) {
-      writeTypedSse(res, event, payload);
-    }
-  };
-  emit('start', { threadId: ctx.threadId, cwd: ctx.cwd, appId: ctx.appId });
-
-  let seq = 0;
-  let turnId = null;
-  const heartbeat = setInterval(() => emit('ping', { t: new Date().toISOString() }), 15000);
-  res.on('close', () => {
-    if (turnId && !res.writableEnded) {
-      codex.request('turn/interrupt', { threadId: ctx.threadId, turnId }).catch(() => {});
-    }
-  });
-
-  const result = await runEphemeralTurn(ctx, {
-    onTurnId: (id) => { turnId = id; },
-    onDelta: (delta, tid) => emit('delta', { turnId: tid, delta, seq: seq++ }),
-  });
-  clearInterval(heartbeat);
-  discardThread(ctx.threadId);
-
-  if (result.status === 'error') {
-    emit('error', { code: 'turn_failed', message: ctx._error || 'complete 失败' });
-    res.end();
-    return;
-  }
-  if (result.status === 'timeout') {
-    emit('error', { code: 'stream_timeout', message: 'complete 等待超时' });
-    res.end();
-    return;
-  }
-
-  const artifacts = await collectArtifacts(result.text, ctx);
-  for (const artifact of artifacts) {
-    emit('artifact', artifact);
-  }
-  const donePayload = { status: result.status, finalText: result.text, artifacts, usage: result.usage ?? null };
-  if (ctx.outputSchema) {
-    const parsed = tryParseJson(result.text);
-    donePayload.parsed = parsed.ok ? parsed.value : null;
-    if (!parsed.ok) {
-      donePayload.parseError = parsed.error;
-    }
-  }
-  emit('done', donePayload);
-  res.end();
-}
-
 // 用请求自身的协议+host 拼绝对地址：经隧道进来是 https://bridge.example.com，本机是 http://127.0.0.1:4555。
 // 这样发给非局域网 App 的图片 url 可直接取用，不用客户端自己拼 base。
 function requestBaseUrl(req) {
@@ -1522,6 +1735,36 @@ function requestBaseUrl(req) {
   const proto = forwardedProto ? String(forwardedProto).split(',')[0].trim() : 'http';
   const host = req.headers['x-forwarded-host'] || req.headers.host || `${config.server.host}:${config.server.port}`;
   return `${proto}://${String(host).split(',')[0].trim()}`;
+}
+
+function buildMobileSessionUrl(req, sessionId = '') {
+  void req;
+  const params = new URLSearchParams();
+  if (sessionId) params.set('sessionId', sessionId);
+  const query = params.toString();
+  return `/m/index.htm${query ? `?${query}` : ''}`;
+}
+
+async function notifySessionComplete(req, session, text, { appId = null } = {}) {
+  const result = await pushNotifications.notifyAll(
+    buildCompletionPayload({
+      title: 'Codex 回复完成',
+      body: text ? String(text).replace(/\s+/g, ' ').trim() : '点开继续这个会话。',
+      url: buildMobileSessionUrl(req, session.id),
+      sessionId: session.id,
+    }),
+    { appId: appId || session.appId || null },
+  );
+  publish({
+    type: 'bridge.push.sent',
+    sessionId: session.id,
+    result,
+    receivedAt: new Date().toISOString(),
+  });
+  if (result.failed > 0) {
+    await persistState();
+  }
+  return result;
 }
 
 async function buildImageEvent(session, absPath, appId, turnId, baseUrl) {
@@ -1741,6 +1984,37 @@ function openSse(res, sessionId) {
   });
 }
 
+function openMobileEventsSse(res) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+
+  writeSse(res, {
+    type: 'bridge.mobile.sse.connected',
+    receivedAt: new Date().toISOString(),
+  });
+
+  function onEvent(event) {
+    if (event?.type !== 'bridge.mobile.unread') {
+      return;
+    }
+    writeSse(res, event);
+  }
+
+  bus.on('event', onEvent);
+  const heartbeat = setInterval(() => {
+    writeSse(res, { type: 'bridge.mobile.heartbeat', receivedAt: new Date().toISOString() });
+  }, 15000);
+
+  res.on('close', () => {
+    clearInterval(heartbeat);
+    bus.off('event', onEvent);
+  });
+}
+
 function writeSse(res, payload) {
   res.write(`event: message\n`);
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -1785,6 +2059,20 @@ function normalizeInput(body) {
       text_elements: [],
     },
   ];
+}
+
+function extraMobileInput(body, text) {
+  if (!Array.isArray(body.input)) {
+    return [];
+  }
+  const seenText = String(text || '').trim();
+  return body.input
+    .map(normalizeInputItem)
+    .filter((item) => {
+      if (item.type !== 'text') return true;
+      const value = String(item.text || '').trim();
+      return value && value !== seenText;
+    });
 }
 
 function normalizeInputItem(item) {
@@ -1877,9 +2165,16 @@ function apiDocumentation() {
       'GET /api/server-requests',
       'POST /api/server-requests/:id/respond',
       'GET /api/mobile/bootstrap',
+      'GET /api/mobile/events',
       'GET /api/mobile/projects/:id/sessions',
       'GET /api/mobile/sessions/:id',
       'POST /api/mobile/chat (SSE stream)',
+      'GET /api/mobile/push-public-key',
+      'POST /api/mobile/push-subscriptions',
+      'POST /api/mobile/push-subscriptions/status',
+      'DELETE /api/mobile/push-subscriptions',
+      'POST /api/mobile/push/test',
+      'POST /api/mobile/push/notify',
       'GET /api/sessions',
       'POST /api/sessions',
       'GET /api/projects',
@@ -1920,6 +2215,7 @@ function buildPersistPayload() {
     },
     apps: apps.toJSON(),
     sessions: store.toJSON(),
+    push: pushNotifications.toJSON(),
   };
 }
 
@@ -1960,7 +2256,7 @@ function schedulePersist(delayMs = 750) {
 
 async function serveStatic(req, res, url) {
   const rootPath = shouldServeMobileRoot(req) ? '/m/index.html' : '/index.html';
-  const pathname = decodeURIComponent(url.pathname === '/' ? rootPath : url.pathname);
+  const pathname = decodeURIComponent(normalizeStaticPathname(url.pathname, rootPath));
   const target = path.resolve(publicRoot, `.${pathname}`);
   if (!target.startsWith(publicRoot)) {
     sendText(res, 403, 'Forbidden');

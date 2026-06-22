@@ -8,15 +8,16 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test tests/*.test.mjs",
-    "baseline": "npm test && npm run smoke:android",
+    "baseline": "npm test && npm run smoke:mobile",
     "smoke": "node scripts/smoke-test.mjs",
-    "smoke:android": "node scripts/android-smoke-test.mjs"
+    "smoke:mobile": "node scripts/mobile-smoke-test.mjs"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.139.0",
-    "swagger-ui-dist": "^5.32.6"
+    "swagger-ui-dist": "^5.32.6",
+    "web-push": "^3.6.7"
   }
 }

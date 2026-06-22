@@ -74,7 +74,25 @@ export function evaluateApiAccess({ req, security, apps }) {
     return deny(403, '该 appId 已停用', clientIp, app.appId);
   }
 
+  if (!isAppRouteAllowed(req.method, new URL(req.url, 'http://codex-bridge.local').pathname)) {
+    return deny(403, '该 appId 只允许访问移动端和单次任务 API', clientIp, app.appId);
+  }
+
   return allow('app', { reason: 'app-key', clientIp, appId: app.appId });
+}
+
+export function isAppRouteAllowed(method = 'GET', pathname = '') {
+  const verb = String(method || 'GET').toUpperCase();
+  const path = String(pathname || '');
+  if (verb === 'GET' && path === '/api/health') return true;
+  if (verb === 'POST' && path === '/api/complete') return true;
+  if (verb === 'POST' && path === '/api/uploads/images') return true;
+  if (verb === 'GET' && /^\/api\/sessions\/[^/]+\/files$/.test(path)) return true;
+  if (verb === 'POST' && /^\/api\/sessions\/[^/]+\/interrupt$/.test(path)) return true;
+  if (path.startsWith('/api/mobile/')) {
+    return true;
+  }
+  return false;
 }
 
 export function normalizeClientIp(value = '') {

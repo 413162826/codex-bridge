@@ -12,7 +12,7 @@ export async function loadBridgeState() {
     raw = await readFile(stateFile, 'utf8');
   } catch (error) {
     if (error.code === 'ENOENT') {
-      return { config: {}, apps: [], sessions: [] };
+      return emptyState();
     }
     throw error;
   }
@@ -25,14 +25,19 @@ export async function loadBridgeState() {
     } catch {
       // 备份失败也不致命，继续以空状态启动。
     }
-    return { config: {}, apps: [], sessions: [] };
+    return emptyState();
   }
 
   return {
     config: parsed.config && typeof parsed.config === 'object' ? parsed.config : {},
     apps: Array.isArray(parsed.apps) ? parsed.apps : [],
     sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+    push: parsed.push && typeof parsed.push === 'object' ? parsed.push : {},
   };
+}
+
+function emptyState() {
+  return { config: {}, apps: [], sessions: [], push: {} };
 }
 
 // 原子写：先写临时文件再 rename 覆盖，避免并发/中断写出半截 JSON。

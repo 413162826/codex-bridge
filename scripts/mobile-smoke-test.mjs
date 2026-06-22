@@ -16,7 +16,7 @@ async function main() {
     method: 'POST',
     headers: appHeaders,
     body: {
-      fileName: 'android-smoke.png',
+      fileName: 'mobile-smoke.png',
       mimeType: 'image/png',
       base64: onePixelPngBase64,
     },
@@ -29,7 +29,7 @@ async function main() {
     method: 'POST',
     headers: appHeaders,
     body: {
-      name: 'Android app smoke',
+      name: 'Mobile API smoke',
       appId: app.appId,
       ephemeral: false,
       persistExtendedHistory: true,
@@ -49,11 +49,11 @@ async function main() {
   assertEqual(fileRes.bytes, 70, 'session file route bytes');
   console.log('file:', fileRes.status, fileRes.bytes);
 
-  const firstTurn = await sendWait(sessionId, appHeaders, '只回复 ANDROID-BRIDGE-SMOKE');
-  assertLastAssistant(firstTurn.session, 'ANDROID-BRIDGE-SMOKE');
+  const firstTurn = await sendWait(sessionId, appHeaders, '只回复 MOBILE-BRIDGE-SMOKE');
+  assertLastAssistant(firstTurn.session, 'MOBILE-BRIDGE-SMOKE');
 
-  const secondTurn = await sendWait(sessionId, appHeaders, '继续使用同一个会话，只回复 ANDROID-BRIDGE-SMOKE-2');
-  assertLastAssistant(secondTurn.session, 'ANDROID-BRIDGE-SMOKE-2');
+  const secondTurn = await sendWait(sessionId, appHeaders, '继续使用同一个会话，只回复 MOBILE-BRIDGE-SMOKE-2');
+  assertLastAssistant(secondTurn.session, 'MOBILE-BRIDGE-SMOKE-2');
   assertEqual(secondTurn.session.messages.length, 4, 'continuous session message count');
 
   const sessions = await request('/api/sessions', { headers: appHeaders });
@@ -73,7 +73,7 @@ async function readApp(appId) {
 async function createApp() {
   const result = await request('/api/apps', {
     method: 'POST',
-    body: { name: 'android-smoke' },
+    body: { name: 'mobile-smoke' },
   });
   return result.app;
 }

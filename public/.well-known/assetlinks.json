@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "xyz.kevinsu.bridge.twa",
+        "sha256_cert_fingerprints": ["53:5A:3C:BD:86:22:6D:3F:DF:4C:47:1A:3F:12:E8:7B:29:32:62:AA:53:D6:BA:A2:AE:DF:27:4C:AF:ED:D1:A8"]
+      }
+    }]

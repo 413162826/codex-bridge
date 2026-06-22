@@ -6,14 +6,14 @@
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#f7f4ef" />
+    <meta name="theme-color" content="#eee7dc" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Codex Chat" />
     <link rel="manifest" href="/m/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/m/apple-touch-icon.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="/m/icon-192.png" />
-    <link rel="stylesheet" href="/m/styles.css" />
+    <link rel="stylesheet" href="/m/styles.css?v=11" />
     <title>Codex Chat</title>
   </head>
   <body>
@@ -28,7 +28,7 @@
         </button>
       </header>
 
-      <main class="messages" id="messages">
+      <main class="messages" id="messages" role="log" aria-live="polite" aria-label="对话消息">
         <div class="welcome" id="welcome">
           <div class="welcome-mark">✦</div>
           <h1>Codex Chat</h1>
@@ -43,6 +43,16 @@
 
       <form class="composer" id="composer">
         <div class="composer-row">
+          <button
+            class="plus-btn"
+            id="moreBtn"
+            type="button"
+            aria-label="更多操作"
+            aria-expanded="false"
+            aria-controls="composerPanel"
+          >
+            <svg viewBox="0 0 24 24" width="19" height="19"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
           <textarea
             id="input"
             rows="1"
@@ -53,15 +63,28 @@
             <svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 12l16-8-6 8 6 8z" fill="currentColor"/></svg>
           </button>
         </div>
-        <div class="composer-actions">
-          <button class="mode-btn icon-action" id="attachBtn" type="button" aria-label="添加图片或文件">
-            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M21 12.5l-8.7 8.7a6 6 0 01-8.5-8.5l9.4-9.4a4 4 0 015.7 5.7L9.6 18.3a2 2 0 01-2.8-2.8l8.5-8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="composer-panel" id="composerPanel" hidden>
+          <button class="panel-action" id="attachImageBtn" type="button">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="19" height="19"><path d="M4 5h16v14H4z M4 16l4-4 3 3 4-5 5 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+            </span>
+            <span>图片</span>
           </button>
-          <input id="fileInput" type="file" multiple hidden />
-          <button class="mode-btn" id="imageBtn" type="button" aria-pressed="false">
-            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 5h16v14H4z M4 16l4-4 3 3 4-5 5 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-            回图片
+          <button class="panel-action" id="attachBtn" type="button">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="19" height="19"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 2v5h5M9 13h6M9 17h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </span>
+            <span>文件</span>
           </button>
+          <button class="panel-action" id="imageBtn" type="button" aria-pressed="false">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="19" height="19"><path d="M12 3l2.4 4.9 5.4.8-3.9 3.8.9 5.3L12 15.3 7.2 17.8l.9-5.3-3.9-3.8 5.4-.8z" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round"/></svg>
+            </span>
+            <span>回图片</span>
+          </button>
+        </div>
+        <input id="fileInput" type="file" multiple hidden />
+        <div class="composer-meta">
           <span class="composer-hint" id="hint"></span>
         </div>
         <div class="attachment-list" id="attachList"></div>
@@ -81,6 +104,13 @@
       </div>
       <button class="drawer-new" id="drawerNew" type="button">＋ 新会话</button>
       <div class="session-list" id="drawerList"></div>
+      <button class="drawer-notify" id="pushBtn" type="button">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+          <path d="M6 9a6 6 0 0 1 12 0v4.4l1.7 2.6H4.3L6 13.4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+          <path d="M9.5 19a2.8 2.8 0 0 0 5 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span id="pushLabel">开启通知</span>
+      </button>
       <button class="drawer-settings" id="settingsBtn" type="button">⚙ 接入设置（地址 / appId）</button>
     </aside>
 
@@ -103,7 +133,7 @@
 
     <div class="toast" id="toast" hidden></div>
 
-    <script src="/m/app.js?v=5" type="module"></script>
+    <script src="/m/app.js?v=14" type="module"></script>
     <script>
       // 注册 Service Worker：让 PWA 可被「安装」，并实现弱网/离线秒开。
       if ('serviceWorker' in navigator) {
