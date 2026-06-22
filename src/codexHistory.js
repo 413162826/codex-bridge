@@ -220,6 +220,7 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
 
   // 从文件尾部反向找最近一条可见消息，只把 final_answer 当成“回答结束”。
   // commentary/status 只是电脑端工作过程提示，不能触发手机提醒。
+  // 找到 final 后继续向前找它对应的最近一条用户消息，用作移动端通知标题。
   async function readLatestFinalAnswer(file) {
     let handle;
     try {
@@ -231,6 +232,7 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
       await handle.read(buffer, 0, length, stat.size - length);
       const text = buffer.toString('utf8');
       const lines = text.split(/\r?\n/).reverse();
+      let latest = null;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed.startsWith('{')) continue;
@@ -243,21 +245,32 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
         }
         if (o.type !== 'event_msg') continue;
         const payload = o.payload || {};
-        if (payload.type === 'user_message') {
-          return null;
+        if (!latest) {
+          if (payload.type === 'user_message') {
+            return null;
+          }
+          if (payload.type !== 'agent_message') continue;
+          if (payload.phase !== 'final_answer') {
+            return null;
+          }
+          const message = String(payload.message ?? payload.text ?? '').trim();
+          if (!message) return null;
+          latest = {
+            at: o.timestamp || payload.timestamp || null,
+            text: stripLongText(message),
+            title: '',
+          };
+          continue;
         }
-        if (payload.type !== 'agent_message') continue;
-        if (payload.phase !== 'final_answer') {
-          return null;
+
+        if (payload.type !== 'user_message') continue;
+        const raw = String(payload.message ?? payload.text ?? '');
+        if (raw && !isPrewarm(raw)) {
+          latest.title = previewMessage(raw);
+          return latest;
         }
-        const message = String(payload.message ?? payload.text ?? '').trim();
-        if (!message) return null;
-        return {
-          at: o.timestamp || payload.timestamp || null,
-          text: stripLongText(message),
-        };
       }
-      return null;
+      return latest;
     } catch {
       return null;
     } finally {
@@ -483,7 +496,7 @@ export function createCodexHistory({ codexHome = resolveCodexHome() } = {}) {
         updatedAt: latest.at || thread.updatedAt || thread.startedAt,
         assistantAt: latest.at || thread.updatedAt || thread.startedAt,
         assistantText: latest.text,
-        title: title || thread.projectName || 'Codex 回复完成',
+        title: latest.title || title || thread.projectName || 'Codex 回复完成',
       };
     });
     return data.filter(Boolean);

@@ -49,6 +49,7 @@ const nativeHistoryMonitor = createNativeHistoryMonitor({
   store,
   publish,
   intervalMs: nativeHistoryMonitorIntervalMs(),
+  watchEnabled: nativeHistoryMonitorWatchEnabled(),
 });
 
 let codex = createClient();
@@ -122,6 +123,10 @@ function startNativeHistoryMonitor() {
 function nativeHistoryMonitorIntervalMs() {
   const value = Number(process.env.CODEX_BRIDGE_NATIVE_HISTORY_POLL_MS || '');
   return Number.isFinite(value) && value >= 1000 ? value : undefined;
+}
+
+function nativeHistoryMonitorWatchEnabled() {
+  return process.env.CODEX_BRIDGE_NATIVE_HISTORY_WATCH !== '0';
 }
 
 async function publishMobileUnread(event) {

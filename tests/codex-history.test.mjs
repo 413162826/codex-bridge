@@ -60,6 +60,18 @@ async function makeFixture() {
     ]),
   );
 
+  // beta2：同一线程多轮完成时，通知标题应取最后一轮提问，而不是第一轮标题。
+  await writeFile(
+    path.join(day, 'rollout-2026-01-01T13-00-00-dddd.jsonl'),
+    rollout([
+      { timestamp: '2026-01-01T13:00:00.000Z', type: 'session_meta', payload: { id: 'dddd', cwd: projB, timestamp: '2026-01-01T13:00:00.000Z' } },
+      { timestamp: '2026-01-01T13:00:01.000Z', type: 'event_msg', payload: { type: 'user_message', message: '这是很早以前的第一条问题' } },
+      { timestamp: '2026-01-01T13:00:02.000Z', type: 'event_msg', payload: { type: 'agent_message', message: '第一轮回答。', phase: 'final_answer' } },
+      { timestamp: '2026-01-01T13:00:03.000Z', type: 'event_msg', payload: { type: 'user_message', message: '最后一次提问的内容是什么？' } },
+      { timestamp: '2026-01-01T13:00:04.000Z', type: 'event_msg', payload: { type: 'agent_message', message: '这是最后一轮回答。', phase: 'final_answer' } },
+    ]),
+  );
+
   return { home, projA, projB };
 }
 
@@ -161,10 +173,13 @@ test('listRecentFinalAnswers 只返回最近已完成的 final_answer', async ()
   try {
     const history = createCodexHistory({ codexHome: home });
     const finals = await history.listRecentFinalAnswers({ limit: 5 });
-    assert.deepEqual(finals.map((item) => item.id), ['bbbb']);
-    assert.equal(finals[0].assistantText, '已生成。');
-    assert.equal(finals[0].title, '🖼️ 一只赛博朋克猫');
-    assert.equal(finals[0].assistantAt, '2026-01-01T11:00:02.000Z');
+    assert.deepEqual(finals.map((item) => item.id), ['dddd', 'bbbb']);
+    assert.equal(finals[0].assistantText, '这是最后一轮回答。');
+    assert.equal(finals[0].title, '最后一次提问的内容是什么？');
+    assert.equal(finals[0].assistantAt, '2026-01-01T13:00:04.000Z');
+    assert.equal(finals[1].assistantText, '已生成。');
+    assert.equal(finals[1].title, '🖼️ 一只赛博朋克猫');
+    assert.equal(finals[1].assistantAt, '2026-01-01T11:00:02.000Z');
   } finally {
     await rm(home, { recursive: true, force: true });
   }
